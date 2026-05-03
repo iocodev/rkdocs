@@ -1,0 +1,36 @@
+From 88d0ab5748b1e3602d072525e23200f6580a4219 Mon Sep 17 00:00:00 2001
+From: huangjc <huangjc@rock-chips.com>
+Date: Thu, 17 Oct 2024 20:34:45 +0800
+Subject: [PATCH] temp: aipq: workaround 1080p60 youtube video drop frame when
+ hdmi under 30hz
+
+Change-Id: Icf57854f9993d4a41c8a08cd0ee613a80bca98b9
+Signed-off-by: huangjc <huangjc@rock-chips.com>
+---
+ media/codec2/sfplugin/CCodecBufferChannel.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/media/codec2/sfplugin/CCodecBufferChannel.cpp b/media/codec2/sfplugin/CCodecBufferChannel.cpp
+index fbfa825f30..b89dda0ab6 100644
+--- a/media/codec2/sfplugin/CCodecBufferChannel.cpp
++++ b/media/codec2/sfplugin/CCodecBufferChannel.cpp
+@@ -919,10 +919,15 @@ status_t CCodecBufferChannel::renderOutputBuffer(
+         }
+     }
+ 
++    bool droppable = true;
++    if (android::base::GetProperty("sys.top_package", "other").find("youtube") != std::string::npos) {
++           droppable = false;
++    }
++
+     // TODO: revisit this after C2Fence implementation.
+     IGraphicBufferProducer::QueueBufferInput qbi(
+             timestampNs,
+-            true, // droppable
++            droppable, // droppable
+             dataSpace,
+             Rect(blocks.front().crop().left,
+                  blocks.front().crop().top,
+-- 
+2.25.1
+

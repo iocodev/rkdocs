@@ -1,0 +1,55 @@
+From 966726412405a56bc17b7d7f0cc84f79832606ce Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Fri, 24 Sep 2021 11:42:21 +0800
+Subject: [PATCH] EinkManager: add EPD_AUTO_DU and EPD_AUTO_DU4 mode
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: Ie7fd78615685ba6dc8960e502575492ab752869b
+---
+ api/current.txt                       | 2 ++
+ core/java/android/os/EinkManager.java | 2 ++
+ non-updatable-api/current.txt         | 2 ++
+ 3 files changed, 6 insertions(+)
+
+diff --git a/api/current.txt b/api/current.txt
+index 4bc769dd13e1..69ee14acd9f0 100755
+--- a/api/current.txt
++++ b/api/current.txt
+@@ -36148,6 +36148,8 @@ package android.os {
+     field public static final String EPD_A2_DITHER = "13";
+     field public static final String EPD_A2_ENTER = "16";
+     field public static final String EPD_AUTO = "0";
++    field public static final String EPD_AUTO_DU = "22";
++    field public static final String EPD_AUTO_DU4 = "23";
+     field public static final String EPD_DU = "14";
+     field public static final String EPD_DU4 = "15";
+     field public static final String EPD_FULL_GC16 = "2";
+diff --git a/core/java/android/os/EinkManager.java b/core/java/android/os/EinkManager.java
+index 62a931647f32..8732c8de7e26 100755
+--- a/core/java/android/os/EinkManager.java
++++ b/core/java/android/os/EinkManager.java
+@@ -70,6 +70,8 @@ public class EinkMode {
+     public static final String EPD_DU4 ="15";
+     public static final String EPD_A2_ENTER ="16";
+     public static final String EPD_RESET ="17";
++    public static final String EPD_AUTO_DU ="22";
++    public static final String EPD_AUTO_DU4 ="23";
+ }
+ 
+ 
+diff --git a/non-updatable-api/current.txt b/non-updatable-api/current.txt
+index 5e88cc103667..025a73a1dc09 100755
+--- a/non-updatable-api/current.txt
++++ b/non-updatable-api/current.txt
+@@ -34715,6 +34715,8 @@ package android.os {
+     field public static final String EPD_A2_DITHER = "13";
+     field public static final String EPD_A2_ENTER = "16";
+     field public static final String EPD_AUTO = "0";
++    field public static final String EPD_AUTO_DU = "22";
++    field public static final String EPD_AUTO_DU4 = "23";
+     field public static final String EPD_DU = "14";
+     field public static final String EPD_DU4 = "15";
+     field public static final String EPD_FULL_GC16 = "2";
+-- 
+2.17.1
+

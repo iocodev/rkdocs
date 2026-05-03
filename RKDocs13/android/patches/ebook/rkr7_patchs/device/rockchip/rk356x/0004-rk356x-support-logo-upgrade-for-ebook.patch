@@ -1,0 +1,33 @@
+From 62ff04f5ddaea5d7bf1be525e75d8c60de8c9eaf Mon Sep 17 00:00:00 2001
+From: Dayao Ji <jdy@rock-chips.com>
+Date: Thu, 16 Sep 2021 17:45:33 +0800
+Subject: [PATCH] rk356x: support logo upgrade for ebook
+
+Signed-off-by: Dayao Ji <jdy@rock-chips.com>
+Change-Id: Ib50325de1790f3ae0ccf1fbc9c60d34ca4cf3368
+---
+ rk3566_eink/recovery.fstab   | 1 +
+ rk3566_einkw6/recovery.fstab | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/rk3566_eink/recovery.fstab b/rk3566_eink/recovery.fstab
+index 0856791..2da8e6f 100644
+--- a/rk3566_eink/recovery.fstab
++++ b/rk3566_eink/recovery.fstab
+@@ -27,3 +27,4 @@
+ /dev/block/by-name/vbmeta                /vbmeta              emmc             defaults                  defaults
+ /dev/block/by-name/dtbo                /dtbo              emmc             defaults                  defaults
+ /dev/block/by-name/vendor_boot           /vendor_boot                emmc             defaults                  defaults
++/dev/block/by-name/logo                 /logo               emmc             defaults                  defaults
+diff --git a/rk3566_einkw6/recovery.fstab b/rk3566_einkw6/recovery.fstab
+index 0856791..2da8e6f 100644
+--- a/rk3566_einkw6/recovery.fstab
++++ b/rk3566_einkw6/recovery.fstab
+@@ -27,3 +27,4 @@
+ /dev/block/by-name/vbmeta                /vbmeta              emmc             defaults                  defaults
+ /dev/block/by-name/dtbo                /dtbo              emmc             defaults                  defaults
+ /dev/block/by-name/vendor_boot           /vendor_boot                emmc             defaults                  defaults
++/dev/block/by-name/logo                 /logo               emmc             defaults                  defaults
+-- 
+2.17.1
+

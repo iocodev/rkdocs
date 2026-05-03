@@ -1,0 +1,66 @@
+From 661f2537bd616f9e77fc3213197f7c88eba5be45 Mon Sep 17 00:00:00 2001
+From: Dayao Ji <jdy@rock-chips.com>
+Date: Thu, 16 Sep 2021 17:37:14 +0800
+Subject: [PATCH 1/2] Add upgrading logo feature
+
+Signed-off-by: Dayao Ji <jdy@rock-chips.com>
+Change-Id: Ia7cdd0af99a6de65640990423082582bc5915798
+---
+ releasetools.py | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/releasetools.py b/releasetools.py
+index d195005f..08f474bb 100755
+--- a/releasetools.py
++++ b/releasetools.py
+@@ -105,6 +105,11 @@ def InstallVendorBoot(vendor_boot_bin, input_zip, info):
+   info.script.Print("Writing vendor_boot img...")
+   info.script.WriteRawImage("/vendor_boot", "vendor_boot.img")
+ 
++def InstallEbookLogo(logo_bin, input_zip, info):
++  common.ZipWriteStr(info.output_zip, "logo.img", logo_bin)
++  info.script.Print("Writing logo image..")
++  info.script.WriteRawImage("/logo", "logo.img")
++
+ def FullOTA_InstallEnd(info):
+   try:
+     trust = info.input_zip.read("trust.img")
+@@ -175,6 +180,13 @@ def FullOTA_InstallEnd(info):
+   except KeyError:
+     print "info: no vendor_boot.img in input target_files; ignore it"
+ 
++  try:
++    logo = info.input_zip.read("IMAGES/logo.img")
++    print "wirte logo now..."
++    InstallEbookLogo(logo, info.input_zip, info)
++  except KeyError:
++    print "info: no logo image; ignore it."
++
+ def IncrementalOTA_InstallEnd(info):
+   try:
+     trust_target = info.target_zip.read("trust.img")
+@@ -310,6 +322,21 @@ def IncrementalOTA_InstallEnd(info):
+   else:
+     print "vendor_boot unchanged; skipping"
+ 
++  try:
++    logo_target = info.target_zip.read("IMAGES/logo.img")
++  except KeyError:
++    logo_target = None
++
++  try:
++    logo_source = info.source_zip.read("IMAGES/logo.img")
++  except KeyError:
++    logo_source = None
++
++  if (logo_target != None) and (logo_target != logo_source):
++    print "write logo now..."
++    InstallEbookLogo(logo_target, info.target_zip, info)
++  else:
++    print "logo unchanged; skipping"
+ 
+ def GetUserImages(input_tmp, input_zip):
+   return {partition: GetUserImage(partition, input_tmp, input_zip)
+-- 
+2.17.1
+

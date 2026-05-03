@@ -1,0 +1,28 @@
+From f81cc894ac7a33c731c918a70148756385c09efe Mon Sep 17 00:00:00 2001
+From: Dayao Ji <jdy@rock-chips.com>
+Date: Thu, 23 Sep 2021 15:53:01 +0800
+Subject: [PATCH] pack logo_a and logo_b
+
+Signed-off-by: Dayao Ji <jdy@rock-chips.com>
+Change-Id: Ifbcb19b83c7b18393cbffdf4727ee2793b2b64ac
+---
+ linux/Linux_Pack_Firmware/rockdev/package-file-rk356x-ab | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/linux/Linux_Pack_Firmware/rockdev/package-file-rk356x-ab b/linux/Linux_Pack_Firmware/rockdev/package-file-rk356x-ab
+index dec437b..b174394 100755
+--- a/linux/Linux_Pack_Firmware/rockdev/package-file-rk356x-ab
++++ b/linux/Linux_Pack_Firmware/rockdev/package-file-rk356x-ab
+@@ -14,7 +14,8 @@ dtbo_b      Image/dtbo.img
+ vbmeta_a    Image/vbmeta.img
+ vbmeta_b    Image/vbmeta.img
+ super       Image/super.img
+-logo        Image/logo.img
++logo_a      Image/logo.img
++logo_b      Image/logo.img
+ waveform    Image/waveform.img
+ 
+ # 要写入backup分区的文件就是自身（update.img）
+-- 
+2.17.1
+

@@ -1,0 +1,24 @@
+From 3bb9fc4ecfa4dd8308b38089f55ff6fbf7fa9dcf Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Fri, 24 Sep 2021 09:17:37 +0800
+Subject: [PATCH] configs: rk3566-eink.config: enable gpio leds
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: I1e28b5ac04180de91b649d80ac785d13163054ef
+---
+ configs/rk3566-eink.config | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/configs/rk3566-eink.config b/configs/rk3566-eink.config
+index 1d93005ef9..c91252e065 100644
+--- a/configs/rk3566-eink.config
++++ b/configs/rk3566-eink.config
+@@ -6,3 +6,5 @@ CONFIG_ROCKCHIP_EINK=y
+ CONFIG_ROCKCHIP_TPS65185=y
+ CONFIG_TRUST_INI="RK3566TRUST_ULTRA.ini"
+ CONFIG_OPTEE_ALWAYS_USE_SECURITY_PARTITION=y
++CONFIG_LED=y
++CONFIG_LED_GPIO=y
+-- 
+2.17.1
+

@@ -1,0 +1,50 @@
+From 9f1d22a8f0c551bf2a9a1938bd35722c9b1ba9a7 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Thu, 16 Sep 2021 18:19:12 +0800
+Subject: [PATCH] regulator: xz3216: add resume function
+
+enable sleep vol when resume, if not reboot will failed after sleep out
+by vdd_cpu off
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: If56bc9894abb37b771ed1097e0deb73c679cc315
+---
+ drivers/regulator/xz3216.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/regulator/xz3216.c b/drivers/regulator/xz3216.c
+index eff6ad48caa0..e3edd1099e94 100644
+--- a/drivers/regulator/xz3216.c
++++ b/drivers/regulator/xz3216.c
+@@ -216,6 +216,20 @@ static int xz3216_dcdc_set_suspend_mode(struct regulator_dev *dev,
+ 	}
+ }
+ 
++static int xz3216_resume(struct regulator_dev *rdev)
++{
++	int ret;
++
++	if (!rdev->constraints->state_mem.changeable)
++		return 0;
++
++	ret = xz3216_dcdc_suspend_enable(rdev);
++	if (ret)
++		return ret;
++
++	return regulator_suspend_enable(rdev, PM_SUSPEND_MEM);
++}
++
+ static const int slew_rates[] = {
+ 	64000,
+ 	32000,
+@@ -263,6 +277,7 @@ static struct regulator_ops xz3216_dcdc_ops = {
+ 	.set_suspend_mode = xz3216_dcdc_set_suspend_mode,
+ 	.set_ramp_delay = xz3216_set_ramp,
+ 	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.resume = xz3216_resume,
+ };
+ 
+ static int xz3216_regulator_register(struct xz3216 *xz3216, struct regulator_config *config)
+-- 
+2.17.1
+

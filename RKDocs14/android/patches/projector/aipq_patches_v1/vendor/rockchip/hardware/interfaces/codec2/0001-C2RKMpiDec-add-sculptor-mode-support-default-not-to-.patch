@@ -1,0 +1,4009 @@
+From 576d96a1da88da47e156ea781eba87ddf137007c Mon Sep 17 00:00:00 2001
+From: huangjc <huangjc@rock-chips.com>
+Date: Fri, 24 May 2024 17:10:31 +0800
+Subject: [PATCH] add sculptor mode support,default not to compile
+
+Type: Function
+Redmine ID: N/A
+Associated modifications: N/A
+Test: self-testing pass
+Version: patch_V1
+
+Change-Id: Id23d7a32bce6b643bdd69efb58a7965eb8f4ed2d
+---
+ component/Android.bp                          |    1 +
+ component/base/Android.bp                     |   21 +
+ component/osal/Android.bp                     |    4 +
+ component/osal/C2RKGralloc4.cpp               |   50 +
+ component/osal/C2RKGrallocOps.cpp             |    8 +
+ component/osal/C2RKGrallocOrigin.cpp          |    8 +
+ component/osal/C2RKVdecExtendFeature.cpp      |   12 +
+ component/osal/SculptorCtrl.cpp               |  235 ++++
+ component/osal/include/C2RKGralloc4.h         |    2 +
+ component/osal/include/C2RKGrallocInterface.h |    2 +
+ component/osal/include/C2RKGrallocOps.h       |    2 +
+ component/osal/include/C2RKGrallocOrigin.h    |    2 +
+ .../osal/include/C2RKVdecExtendFeature.h      |    1 +
+ component/osal/include/SculptorCtrl.h         |   65 ++
+ component/osal/include/sculptor/linux/drm.h   | 1021 +++++++++++++++++
+ .../osal/include/sculptor/linux/drm_fourcc.h  |  786 +++++++++++++
+ .../osal/include/sculptor/linux/drm_mode.h    |  571 +++++++++
+ component/osal/include/sculptor/sculptor.h    |   98 ++
+ component/video/Android.bp                    |    1 +
+ component/video/C2RKMpiDec.cpp                |  444 ++++++-
+ component/video/C2RKMpiDec.h                  |   64 +-
+ .../android.hardware.media.c2@1.1-arm.policy  |   26 +
+ ...android.hardware.media.c2@1.1-arm64.policy |   25 +
+ 23 files changed, 3444 insertions(+), 5 deletions(-)
+ create mode 100755 component/osal/SculptorCtrl.cpp
+ create mode 100755 component/osal/include/SculptorCtrl.h
+ create mode 100755 component/osal/include/sculptor/linux/drm.h
+ create mode 100755 component/osal/include/sculptor/linux/drm_fourcc.h
+ create mode 100644 component/osal/include/sculptor/linux/drm_mode.h
+ create mode 100755 component/osal/include/sculptor/sculptor.h
+
+diff --git a/component/Android.bp b/component/Android.bp
+index 6c43864..520dc39 100644
+--- a/component/Android.bp
++++ b/component/Android.bp
+@@ -4,6 +4,7 @@ cc_library_shared {
+     defaults: [
+         "libcodec2_rk-defaults",
+         "libcodec2_rk_sanitize_signed-defaults",
++        "rk_projector_c2_cc_defaults",
+     ],
+ 
+     srcs: [
+diff --git a/component/base/Android.bp b/component/base/Android.bp
+index 471431b..abdada0 100644
+--- a/component/base/Android.bp
++++ b/component/base/Android.bp
+@@ -1,3 +1,24 @@
++soong_config_module_type {
++    name: "rk_projector_c2_soong_cc_defaults",
++    module_type: "cc_defaults",
++    config_namespace: "rk_projector_c2",
++    bool_variables: ["rk_projector_c2_en"],
++    properties: ["cflags", "shared_libs"],
++}
++
++rk_projector_c2_soong_cc_defaults {
++    name: "rk_projector_c2_cc_defaults",
++
++    soong_config_variables: {
++        rk_projector_c2_en: {
++            cflags: [
++                "-DSCULPTOR_ENABLE=1",
++            ],
++            shared_libs:["libsculptor"],
++        },
++    },
++}
++
+ cc_defaults {
+     name: "libcodec2_rk-defaults",
+     defaults: ["libcodec2-impl-defaults"],
+diff --git a/component/osal/Android.bp b/component/osal/Android.bp
+index 088f3ce..0ceccb8 100644
+--- a/component/osal/Android.bp
++++ b/component/osal/Android.bp
+@@ -10,6 +10,9 @@ cc_library_headers {
+ cc_library_static {
+     name: "libcodec2_rk_osal",
+     vendor: true,
++    defaults: [
++        "rk_projector_c2_cc_defaults",
++    ],
+ 
+     srcs: [
+         "C2RKChipCapDef.cpp",
+@@ -23,6 +26,7 @@ cc_library_static {
+         "C2RKVdecExtendFeature.cpp",
+         "C2RKMemTrace.cpp",
+         "C2RKPropsDef.cpp",
++        "SculptorCtrl.cpp",
+     ],
+ 
+     shared_libs: [
+diff --git a/component/osal/C2RKGralloc4.cpp b/component/osal/C2RKGralloc4.cpp
+index 355a605..f5d43e0 100644
+--- a/component/osal/C2RKGralloc4.cpp
++++ b/component/osal/C2RKGralloc4.cpp
+@@ -68,6 +68,7 @@ const static IMapper::MetadataType RkMetadataType_OFFSET_OF_DYNAMIC_HDR_METADATA
+     GRALLOC_RK_METADATA_TYPE_NAME,
+     OFFSET_OF_DYNAMIC_HDR_METADATA
+ };
++#define RkMetadataType_OFFSET_OF_PQ_METADATA RkMetadataType_OFFSET_OF_DYNAMIC_HDR_METADATA
+ 
+ static IMapper &get_service()
+ {
+@@ -366,3 +367,52 @@ int32_t C2RKGralloc4::unmapScaleMeta(buffer_handle_t handle) {
+     return -1;
+ }
+ 
++int32_t C2RKGralloc4::setPqMeta(buffer_handle_t handle, int64_t offset) {
++    int32_t err = android::OK;
++    auto &mapper = get_service();
++    hidl_vec<uint8_t> encodedOffset;
++
++    err = encodeRkOffsetOfVideoMetadata(offset, &encodedOffset);
++    if (err != android::OK) {
++        c2_err("Failed to encode offset_of_dynamic_hdr_metadata. err : %d", err);
++        return err;
++    }
++
++    auto ret = mapper.set(const_cast<native_handle_t*>(handle),
++                          RkMetadataType_OFFSET_OF_PQ_METADATA,
++                          encodedOffset);
++    const Error error = ret.withDefault(Error::NO_RESOURCES);
++    switch (error) {
++        case Error::BAD_DESCRIPTOR:
++        case Error::BAD_BUFFER:
++        case Error::BAD_VALUE:
++        case Error::NO_RESOURCES:
++             c2_err("set(%s, %lld, ...) failed with %d",
++                RkMetadataType_OFFSET_OF_PQ_METADATA.name.c_str(),
++                (long long)RkMetadataType_OFFSET_OF_PQ_METADATA.value,
++                error);
++            err = -1;
++            break;
++        // It is not an error to attempt to set metadata that a particular gralloc implementation
++        // happens to not support.
++        case Error::UNSUPPORTED:
++        case Error::NONE:
++            break;
++    }
++
++    return -1;
++}
++
++int64_t C2RKGralloc4::getPqMeta(buffer_handle_t handle) {
++    auto &mapper = get_service();
++    int64_t offset = 0;
++
++    int err = get_metadata(mapper, handle, RkMetadataType_OFFSET_OF_PQ_METADATA,
++                           decodeRkOffsetOfVideoMetadata, &offset);
++    if (err != android::OK) {
++        c2_err("Failed to get buffer id. err : %d", err);
++        return 0;
++    }
++
++    return -1;
++}
+diff --git a/component/osal/C2RKGrallocOps.cpp b/component/osal/C2RKGrallocOps.cpp
+index 3f67f3c..058f241 100644
+--- a/component/osal/C2RKGrallocOps.cpp
++++ b/component/osal/C2RKGrallocOps.cpp
+@@ -90,4 +90,12 @@ int32_t C2RKGrallocOps::unmapScaleMeta(buffer_handle_t handle) {
+     return mGrallocOps->unmapScaleMeta(handle);
+ }
+ 
++int32_t C2RKGrallocOps::setPqMeta(buffer_handle_t handle, int64_t offset) {
++    return mGrallocOps->setPqMeta(handle, offset);
++}
++
++int64_t C2RKGrallocOps::getPqMeta(buffer_handle_t handle) {
++    return mGrallocOps->getPqMeta(handle);
++}
++
+ }
+diff --git a/component/osal/C2RKGrallocOrigin.cpp b/component/osal/C2RKGrallocOrigin.cpp
+index e94641a..6e385d6 100644
+--- a/component/osal/C2RKGrallocOrigin.cpp
++++ b/component/osal/C2RKGrallocOrigin.cpp
+@@ -231,4 +231,12 @@ int32_t C2RKGrallocOrigin::unmapScaleMeta(buffer_handle_t handle) {
+ 
+     return err;
+ }
++int64_t C2RKGrallocOrigin::getPqMeta(buffer_handle_t handle){
++    int64_t offset = 0;
++    return offset;
++}
+ 
++int32_t C2RKGrallocOrigin::setPqMeta(buffer_handle_t handle, int64_t offset){
++    int err = 0;
++    return err;
++}
+diff --git a/component/osal/C2RKVdecExtendFeature.cpp b/component/osal/C2RKVdecExtendFeature.cpp
+index 2546a2e..cdf07f0 100644
+--- a/component/osal/C2RKVdecExtendFeature.cpp
++++ b/component/osal/C2RKVdecExtendFeature.cpp
+@@ -110,4 +110,16 @@ int C2RKVdecExtendFeature::configFrameScaleMeta(
+     return ret;
+ }
+ 
++int C2RKVdecExtendFeature::configFramePqMeta(buffer_handle_t hnd, int64_t offset)
++{
++    int ret = 0;
++    int64_t dynamicHdrOffset = offset;
++
++    ret = C2RKGrallocOps::get()->setPqMeta(hnd, dynamicHdrOffset);
++    if (ret)
++        return ret;
++
++    return ret;
++}
++
+ }
+diff --git a/component/osal/SculptorCtrl.cpp b/component/osal/SculptorCtrl.cpp
+new file mode 100755
+index 0000000..2ed22bb
+--- /dev/null
++++ b/component/osal/SculptorCtrl.cpp
+@@ -0,0 +1,235 @@
++/*
++ * Copyright (C) 2024 Rockchip Electronics Co. LTD
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#undef  ROCKCHIP_LOG_TAG
++#define ROCKCHIP_LOG_TAG    "SculptorCtrl"
++
++#include <string.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <errno.h>
++#include <cutils/properties.h>
++#include <utils/Log.h>
++#include <thread>
++#include <semaphore.h>
++#include <iostream>
++#include <cstdlib>
++#include <dlfcn.h>
++#include <android/log.h>
++#include <sys/system_properties.h>
++#include <utils/Trace.h>
++#include "SculptorCtrl.h"
++#include <math.h>
++
++
++SculptorCtrl::SculptorCtrl()
++    : mSculptorMode(false){
++#if SCULPTOR_ENABLE
++    mSculptorCtx = nullptr;
++    mCFormat = MPP_FMT_YUV420SP;
++#endif
++}
++
++SculptorCtrl::~SculptorCtrl() {
++#if SCULPTOR_ENABLE
++    if (mSculptorCtx != nullptr) {
++        mSculptorCtx = nullptr;
++    }
++#endif
++}
++
++static bool Rockchip_VF_GetEnvU32(const char *name, uint32_t *value, uint32_t default_value)
++{
++    bool ret = true;
++    char prop[PROP_VALUE_MAX + 1];
++    int len = __system_property_get(name, prop);
++    if (len > 0) {
++        char *endptr;
++        int base = (prop[0] == '0' && prop[1] == 'x') ? (16) : (10);
++        errno = 0;
++        *value = strtoul(prop, &endptr, base);
++        if (errno || (prop == endptr)) {
++            errno = 0;
++            *value = default_value;
++        }
++    } else {
++        *value = default_value;
++    }
++
++    return ret;
++}
++
++#if SCULPTOR_ENABLE
++static void sculptorMppFrameRdyCb(void* data) {
++    MppBuffer mpp_buffer = (MppBuffer)data;
++    if (mpp_buffer) {
++        mpp_buffer_put(mpp_buffer);
++    }
++}
++
++bool SculptorCtrl::getSculptorMode(int width, int height, MppFrameFormat mColorFormat) {
++    uint32_t value = 0;
++    //float verticalAspectRatio9_16 = 9.0f / 16.0f;
++    //float verticalAspectRatio3_4 = 3.0f / 4.0f;
++    //float verticalAspectRatio4_5 = 4.0f / 5.0f;
++    float verticalAspectRatio1_1 = 1.0f;
++    float aspectRatio = static_cast<float>(width) / height;
++
++    if ((height > width) ||
++        abs(aspectRatio - verticalAspectRatio1_1) < 0.02f) {
++        mSculptorMode = 0;
++    } else {
++        mCFormat = mColorFormat;
++        if (width <= 1920 && (mCFormat != MPP_FMT_YUV420SP_10BIT))
++            Rockchip_VF_GetEnvU32("persist.vendor.sculptor.c2.mode", &value, 1);
++
++        mSculptorMode = value;
++
++        char prop[PROP_VALUE_MAX + 1];
++	int len = __system_property_get("sys.top_package", prop);
++	if(len > 0){
++	   if(strcmp(prop,"com.xiaodianshi.tv.yst") == 0)
++              mSculptorMode = 0;
++	}
++    }
++
++
++    return mSculptorMode;
++}
++
++sclptor_init_sizes_t SculptorCtrl::initSculptor(int mWidth, int mHeight) {
++    int mWStride=0;
++    int mHStride=0;
++    int ret = 0;
++    uint32_t value = 0;
++    uint32_t type = 0;
++    sclptor_init_sizes_t parms = {0,0,0,0};
++
++    if (!getSculptorMode(mWidth, mHeight, mCFormat))
++        return parms;
++
++    ALOGE("initSculptor: w %d h %d mSculptorMode %d", mWidth, mHeight, mSculptorMode);
++
++    // 1.实宽实高1080P片源，虚宽虚高不需要改，按照rockit配置的
++    // 2.其他<1080P H265片源，需要修改虚宽虚高，实宽实高
++
++    Rockchip_VF_GetEnvU32("persist.vendor.sculptor.sronly", &value, 0);
++    if (value) {
++        __system_property_set("rt_vpp_act_res","3840x2160");
++        __system_property_set("rt_vpp_vir_res","3840x2160");
++        __system_property_set("rt_vpp_fps","0");
++        type = SCULPTOR_PROCESS_TYPE_SR;
++        mWidth = 3840;
++        mHeight = 2160;
++        mWStride = 3840;
++        mHStride = 2160;
++    } else {
++        __system_property_set("rt_vpp_act_res","1920x1080");
++        __system_property_set("rt_vpp_vir_res","1920x1088");
++        __system_property_set("rt_vpp_fps","60");
++        Rockchip_VF_GetEnvU32("persist.vendor.sculptor.enable.fe", &value, 0);
++        if (value && mWidth <=960 && mHeight <= 540)
++            __system_property_set("rt_vpp_fps","0");
++        else
++            __system_property_set("rt_vpp_fps","60");
++        type = SCULPTOR_PROCESS_TYPE_SR | SCULPTOR_PROCESS_TYPE_MEMC;
++        mWidth = 1920;
++        mHeight = 1080;
++        mWStride = 1920;
++        mHStride = 1088;
++    }
++    ALOGE("initSculptor sculptor_create ----------------------------------------s");
++
++    if (mSculptorCtx == NULL)
++        ret = sculptor_create(type, &mSculptorCtx);
++
++    if (mSculptorCtx == NULL)
++        return parms;
++    parms.width = mWidth;
++    parms.height = mHeight;
++    parms.wstride = mWStride;
++    parms.hstride = mHStride;
++    ALOGE("initSculptor sculptor_create ----------------------------------------e");
++
++    return parms;
++}
++
++/* copy output MppBuffer, if not output buffer specified, copy to mOutBlock default. */
++int SculptorCtrl::doSculptorProcess(MppFrame frame) {
++    //ATRACE_CALL();
++    MppBuffer mppBuffer = mpp_frame_get_buffer(frame);
++    sculptor_frame_t sculptorFrame;
++    uint32_t mppFormat;
++
++    memset(&sculptorFrame, 0, sizeof(sculptor_frame_t));
++    sculptorFrame.prime_fd = mpp_buffer_get_fd(mppBuffer);
++    sculptorFrame.size = mpp_buffer_get_size(mppBuffer);
++    sculptorFrame.width = mpp_frame_get_width(frame);
++    sculptorFrame.height = mpp_frame_get_height(frame);
++    sculptorFrame.vir_width = mpp_frame_get_hor_stride(frame);
++    sculptorFrame.vir_height = mpp_frame_get_ver_stride(frame);
++    sculptorFrame.stride = mpp_frame_get_hor_stride(frame);
++    mppFormat = mpp_frame_get_fmt(frame);
++    if (!MPP_FRAME_FMT_IS_YUV_10BIT(mppFormat))
++        sculptorFrame.drm_format = DRM_FORMAT_NV12;
++    else
++        sculptorFrame.drm_format = DRM_FORMAT_NV15;
++    sculptorFrame.drm_modifier = 0;
++    sculptorFrame.pts = mpp_frame_get_pts(frame);
++    sculptorFrame.callback = sculptorMppFrameRdyCb;
++    sculptorFrame.private_data = mppBuffer;
++
++    sculptor_sculpt(mSculptorCtx, &sculptorFrame);
++
++    return 0;
++}
++
++sculptor_buffer SculptorCtrl::commitSculptorBuffer(uint32_t fd, uint32_t size, uint32_t width, uint32_t height,
++                                uint32_t vir_width, uint32_t vir_height, uint32_t stride, sculptor_callback callback,
++                                void * private_data){
++    sculptor_frame_t sframe;
++
++    memset(&sframe, 0, sizeof(sframe));
++    sframe.prime_fd = fd;
++    sframe.addrs = nullptr;
++    sframe.size = size;
++    sframe.width = width;
++    sframe.height = height;
++    sframe.vir_width = vir_width;
++    sframe.vir_height = vir_height;
++    sframe.stride = stride;
++    sframe.drm_format = DRM_FORMAT_NV12;
++    sframe.drm_modifier = 0;
++    sframe.callback = callback;
++    sframe.private_data = private_data;
++    return sculptor_buffer_commit(mSculptorCtx, &sframe);
++}
++
++void SculptorCtrl::resetSculptor() {
++    ALOGE("%s: sculptor_reset-----------------------s", __FUNCTION__);
++    sculptor_reset(mSculptorCtx);
++    ALOGE("%s: sculptor_reset-----------------------e", __FUNCTION__);
++}
++
++void SculptorCtrl::deinitSculptor() {
++    ALOGE("%s: sculptor_deinit-----------------------s", __FUNCTION__);
++    sculptor_reset(mSculptorCtx);
++    sculptor_destroy(mSculptorCtx);
++    mSculptorCtx = nullptr;
++    ALOGE("%s: sculptor_deinit-----------------------e", __FUNCTION__);
++}
++
++#endif
+diff --git a/component/osal/include/C2RKGralloc4.h b/component/osal/include/C2RKGralloc4.h
+index ffe68bb..71ecc26 100644
+--- a/component/osal/include/C2RKGralloc4.h
++++ b/component/osal/include/C2RKGralloc4.h
+@@ -41,6 +41,8 @@ public:
+     virtual int64_t  getDynamicHdrMeta(buffer_handle_t handle);
+     virtual int32_t  mapScaleMeta(buffer_handle_t handle, metadata_for_rkvdec_scaling_t** metadata);
+     virtual int32_t  unmapScaleMeta(buffer_handle_t handle);
++    virtual int32_t  setPqMeta(buffer_handle_t handle, int64_t offset);
++    virtual int64_t  getPqMeta(buffer_handle_t handle);
+ 
+ private:
+     C2RKGralloc4() {};
+diff --git a/component/osal/include/C2RKGrallocInterface.h b/component/osal/include/C2RKGrallocInterface.h
+index 3f55f71..d8776fa 100644
+--- a/component/osal/include/C2RKGrallocInterface.h
++++ b/component/osal/include/C2RKGrallocInterface.h
+@@ -70,6 +70,8 @@ public:
+     virtual int64_t  getDynamicHdrMeta(buffer_handle_t handle) = 0;
+     virtual int32_t  mapScaleMeta(buffer_handle_t handle, metadata_for_rkvdec_scaling_t** metadata) = 0;
+     virtual int32_t  unmapScaleMeta(buffer_handle_t handle) = 0;
++    virtual int32_t  setPqMeta(buffer_handle_t handle, int64_t offset) = 0;
++    virtual int64_t  getPqMeta(buffer_handle_t handle) = 0;
+ 
+ };
+ 
+diff --git a/component/osal/include/C2RKGrallocOps.h b/component/osal/include/C2RKGrallocOps.h
+index 3784dd3..83eba23 100644
+--- a/component/osal/include/C2RKGrallocOps.h
++++ b/component/osal/include/C2RKGrallocOps.h
+@@ -53,6 +53,8 @@ public:
+     int64_t  getDynamicHdrMeta(buffer_handle_t handle);
+     int32_t  mapScaleMeta(buffer_handle_t handle, metadata_for_rkvdec_scaling_t** metadata);
+     int32_t  unmapScaleMeta(buffer_handle_t handle);
++    int32_t  setPqMeta(buffer_handle_t handle, int64_t offset);
++    int64_t  getPqMeta(buffer_handle_t handle);
+ 
+ private:
+     C2RKGrallocOps();
+diff --git a/component/osal/include/C2RKGrallocOrigin.h b/component/osal/include/C2RKGrallocOrigin.h
+index bc2ec1a..8640afa 100644
+--- a/component/osal/include/C2RKGrallocOrigin.h
++++ b/component/osal/include/C2RKGrallocOrigin.h
+@@ -43,6 +43,8 @@ public:
+     virtual int64_t  getDynamicHdrMeta(buffer_handle_t handle);
+     virtual int32_t  mapScaleMeta(buffer_handle_t handle, metadata_for_rkvdec_scaling_t** metadata);
+     virtual int32_t  unmapScaleMeta(buffer_handle_t handle);
++    virtual int64_t  getPqMeta(buffer_handle_t handle);
++    virtual int32_t  setPqMeta(buffer_handle_t handle, int64_t offset);
+ 
+ private:
+     C2RKGrallocOrigin();
+diff --git a/component/osal/include/C2RKVdecExtendFeature.h b/component/osal/include/C2RKVdecExtendFeature.h
+index f699812..037d5d9 100644
+--- a/component/osal/include/C2RKVdecExtendFeature.h
++++ b/component/osal/include/C2RKVdecExtendFeature.h
+@@ -35,6 +35,7 @@ public:
+     static int configFrameHdrDynamicMeta(buffer_handle_t hnd, int64_t offset);
+     static int checkNeedScale(buffer_handle_t hnd);
+     static int configFrameScaleMeta(buffer_handle_t hnd, C2PreScaleParam *scaleParam);
++    static int configFramePqMeta(buffer_handle_t hnd, int64_t offset);
+ };
+ 
+ }
+diff --git a/component/osal/include/SculptorCtrl.h b/component/osal/include/SculptorCtrl.h
+new file mode 100755
+index 0000000..d5b346c
+--- /dev/null
++++ b/component/osal/include/SculptorCtrl.h
+@@ -0,0 +1,65 @@
++/*
++ * Copyright (C) 2024 Rockchip Electronics Co. LTD
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef SCULPTOR_CTRL_H__
++#define SCULPTOR_CTRL_H__
++
++#include <stdio.h>
++#include <utils/Timers.h>
++#include "rk_mpi.h"
++
++#if SCULPTOR_ENABLE
++#include "sculptor/sculptor.h"
++#include "sculptor/linux/drm_fourcc.h"
++#endif
++
++typedef struct sclptor_init_sizes {
++    int width;
++    int height;
++    int wstride;
++    int hstride;
++} sclptor_init_sizes_t;
++
++class SculptorCtrl {
++public:
++    SculptorCtrl();
++    ~SculptorCtrl();
++#if SCULPTOR_ENABLE
++    int  doSculptorProcess(MppFrame frame);
++    bool getSculptorMode(int width, int height, MppFrameFormat mColorFormat);
++    sclptor_init_sizes_t  initSculptor(int mWidth, int mHeight);
++    void deinitSculptor();
++    void resetSculptor();
++    sculptor_buffer commitSculptorBuffer(uint32_t fd, uint32_t size, uint32_t width, uint32_t height,
++                                uint32_t vir_width, uint32_t vir_height, uint32_t stride, sculptor_callback callback,
++                                void * private_data);
++
++    sculptor_context getSculptorCtx() { return mSculptorCtx; }
++#endif
++private:
++    bool mSculptorMode;
++#if SCULPTOR_ENABLE
++    /* SCULPTOR interface parameters*/
++    MppFrameFormat mCFormat;
++    sculptor_context   mSculptorCtx;
++    uint32_t mSculptorWidth;
++    uint32_t mSculptorHeight;
++    uint32_t mSculptorHorStride;
++    uint32_t mSculptorVerStride;
++#endif
++};
++
++#endif // SCULPTOR_CTRL_H__
+diff --git a/component/osal/include/sculptor/linux/drm.h b/component/osal/include/sculptor/linux/drm.h
+new file mode 100755
+index 0000000..4d093d7
+--- /dev/null
++++ b/component/osal/include/sculptor/linux/drm.h
+@@ -0,0 +1,1021 @@
++/**
++ * \file drm.h
++ * Header for the Direct Rendering Manager
++ *
++ * \author Rickard E. (Rik) Faith <faith@valinux.com>
++ *
++ * \par Acknowledgments:
++ * Dec 1999, Richard Henderson <rth@twiddle.net>, move to generic \c cmpxchg.
++ */
++
++/*
++ * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
++ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
++ * All rights reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef _DRM_H_
++#define _DRM_H_
++
++#if defined(__KERNEL__)
++
++#include <linux/types.h>
++#include <asm/ioctl.h>
++typedef unsigned int drm_handle_t;
++
++#elif defined(__linux__)
++
++#include <linux/types.h>
++#include <asm/ioctl.h>
++typedef unsigned int drm_handle_t;
++
++#else /* One of the BSDs */
++
++#include <sys/ioccom.h>
++#include <sys/types.h>
++typedef int8_t   __s8;
++typedef uint8_t  __u8;
++typedef int16_t  __s16;
++typedef uint16_t __u16;
++typedef int32_t  __s32;
++typedef uint32_t __u32;
++typedef int64_t  __s64;
++typedef uint64_t __u64;
++typedef size_t   __kernel_size_t;
++typedef unsigned long drm_handle_t;
++
++#endif
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#define __user
++
++#define DRM_NAME    "drm"     /**< Name in kernel, /dev, and /proc */
++#define DRM_MIN_ORDER   5     /**< At least 2^5 bytes = 32 bytes */
++#define DRM_MAX_ORDER   22    /**< Up to 2^22 bytes = 4MB */
++#define DRM_RAM_PERCENT 10    /**< How much system ram can we lock? */
++
++#define _DRM_LOCK_HELD  0x80000000U /**< Hardware lock is held */
++#define _DRM_LOCK_CONT  0x40000000U /**< Hardware lock is contended */
++#define _DRM_LOCK_IS_HELD(lock)    ((lock) & _DRM_LOCK_HELD)
++#define _DRM_LOCK_IS_CONT(lock)    ((lock) & _DRM_LOCK_CONT)
++#define _DRM_LOCKING_CONTEXT(lock) ((lock) & ~(_DRM_LOCK_HELD|_DRM_LOCK_CONT))
++
++typedef unsigned int drm_context_t;
++typedef unsigned int drm_drawable_t;
++typedef unsigned int drm_magic_t;
++
++/**
++ * Cliprect.
++ *
++ * \warning: If you change this structure, make sure you change
++ * XF86DRIClipRectRec in the server as well
++ *
++ * \note KW: Actually it's illegal to change either for
++ * backwards-compatibility reasons.
++ */
++struct drm_clip_rect {
++    unsigned short x1;
++    unsigned short y1;
++    unsigned short x2;
++    unsigned short y2;
++};
++
++/**
++ * Drawable information.
++ */
++struct drm_drawable_info {
++    unsigned int num_rects;
++    struct drm_clip_rect *rects;
++};
++
++/**
++ * Texture region,
++ */
++struct drm_tex_region {
++    unsigned char next;
++    unsigned char prev;
++    unsigned char in_use;
++    unsigned char padding;
++    unsigned int age;
++};
++
++/**
++ * Hardware lock.
++ *
++ * The lock structure is a simple cache-line aligned integer.  To avoid
++ * processor bus contention on a multiprocessor system, there should not be any
++ * other data stored in the same cache line.
++ */
++struct drm_hw_lock {
++    __volatile__ unsigned int lock;     /**< lock variable */
++    char padding[60];           /**< Pad to cache line */
++};
++
++/**
++ * DRM_IOCTL_VERSION ioctl argument type.
++ *
++ * \sa drmGetVersion().
++ */
++struct drm_version {
++    int version_major;    /**< Major version */
++    int version_minor;    /**< Minor version */
++    int version_patchlevel;   /**< Patch level */
++    __kernel_size_t name_len;     /**< Length of name buffer */
++    char __user *name;    /**< Name of driver */
++    __kernel_size_t date_len;     /**< Length of date buffer */
++    char __user *date;    /**< User-space buffer to hold date */
++    __kernel_size_t desc_len;     /**< Length of desc buffer */
++    char __user *desc;    /**< User-space buffer to hold desc */
++};
++
++/**
++ * DRM_IOCTL_GET_UNIQUE ioctl argument type.
++ *
++ * \sa drmGetBusid() and drmSetBusId().
++ */
++struct drm_unique {
++    __kernel_size_t unique_len;   /**< Length of unique */
++    char __user *unique;      /**< Unique name for driver instantiation */
++};
++
++struct drm_list {
++    int count;        /**< Length of user-space structures */
++    struct drm_version __user *version;
++};
++
++struct drm_block {
++    int unused;
++};
++
++/**
++ * DRM_IOCTL_CONTROL ioctl argument type.
++ *
++ * \sa drmCtlInstHandler() and drmCtlUninstHandler().
++ */
++struct drm_control {
++    enum {
++        DRM_ADD_COMMAND,
++        DRM_RM_COMMAND,
++        DRM_INST_HANDLER,
++        DRM_UNINST_HANDLER
++    } func;
++    int irq;
++};
++
++/**
++ * Type of memory to map.
++ */
++enum drm_map_type {
++    _DRM_FRAME_BUFFER = 0,    /**< WC (no caching), no core dump */
++    _DRM_REGISTERS = 1,   /**< no caching, no core dump */
++    _DRM_SHM = 2,         /**< shared, cached */
++    _DRM_AGP = 3,         /**< AGP/GART */
++    _DRM_SCATTER_GATHER = 4,  /**< Scatter/gather memory for PCI DMA */
++    _DRM_CONSISTENT = 5   /**< Consistent memory for PCI DMA */
++};
++
++/**
++ * Memory mapping flags.
++ */
++enum drm_map_flags {
++    _DRM_RESTRICTED = 0x01,      /**< Cannot be mapped to user-virtual */
++    _DRM_READ_ONLY = 0x02,
++    _DRM_LOCKED = 0x04,      /**< shared, cached, locked */
++    _DRM_KERNEL = 0x08,      /**< kernel requires access */
++    _DRM_WRITE_COMBINING = 0x10, /**< use write-combining if available */
++    _DRM_CONTAINS_LOCK = 0x20,   /**< SHM page that contains lock */
++    _DRM_REMOVABLE = 0x40,       /**< Removable mapping */
++    _DRM_DRIVER = 0x80       /**< Managed by driver */
++};
++
++struct drm_ctx_priv_map {
++    unsigned int ctx_id;     /**< Context requesting private mapping */
++    void *handle;        /**< Handle of map */
++};
++
++/**
++ * DRM_IOCTL_GET_MAP, DRM_IOCTL_ADD_MAP and DRM_IOCTL_RM_MAP ioctls
++ * argument type.
++ *
++ * \sa drmAddMap().
++ */
++struct drm_map {
++    unsigned long offset;    /**< Requested physical address (0 for SAREA)*/
++    unsigned long size;  /**< Requested physical size (bytes) */
++    enum drm_map_type type;  /**< Type of memory to map */
++    enum drm_map_flags flags;    /**< Flags */
++    void *handle;        /**< User-space: "Handle" to pass to mmap() */
++    /**< Kernel-space: kernel-virtual address */
++    int mtrr;        /**< MTRR slot used */
++    /*   Private data */
++};
++
++/**
++ * DRM_IOCTL_GET_CLIENT ioctl argument type.
++ */
++struct drm_client {
++    int idx;        /**< Which client desired? */
++    int auth;       /**< Is client authenticated? */
++    unsigned long pid;  /**< Process ID */
++    unsigned long uid;  /**< User ID */
++    unsigned long magic;    /**< Magic */
++    unsigned long iocs; /**< Ioctl count */
++};
++
++enum drm_stat_type {
++    _DRM_STAT_LOCK,
++    _DRM_STAT_OPENS,
++    _DRM_STAT_CLOSES,
++    _DRM_STAT_IOCTLS,
++    _DRM_STAT_LOCKS,
++    _DRM_STAT_UNLOCKS,
++    _DRM_STAT_VALUE,    /**< Generic value */
++    _DRM_STAT_BYTE,     /**< Generic byte counter (1024bytes/K) */
++    _DRM_STAT_COUNT,    /**< Generic non-byte counter (1000/k) */
++
++    _DRM_STAT_IRQ,      /**< IRQ */
++    _DRM_STAT_PRIMARY,  /**< Primary DMA bytes */
++    _DRM_STAT_SECONDARY,    /**< Secondary DMA bytes */
++    _DRM_STAT_DMA,      /**< DMA */
++    _DRM_STAT_SPECIAL,  /**< Special DMA (e.g., priority or polled) */
++    _DRM_STAT_MISSED    /**< Missed DMA opportunity */
++    /* Add to the *END* of the list */
++};
++
++/**
++ * DRM_IOCTL_GET_STATS ioctl argument type.
++ */
++struct drm_stats {
++    unsigned long count;
++    struct {
++        unsigned long value;
++        enum drm_stat_type type;
++    } data[15];
++};
++
++/**
++ * Hardware locking flags.
++ */
++enum drm_lock_flags {
++    _DRM_LOCK_READY = 0x01,      /**< Wait until hardware is ready for DMA */
++    _DRM_LOCK_QUIESCENT = 0x02,  /**< Wait until hardware quiescent */
++    _DRM_LOCK_FLUSH = 0x04,      /**< Flush this context's DMA queue first */
++    _DRM_LOCK_FLUSH_ALL = 0x08,  /**< Flush all DMA queues first */
++    /* These *HALT* flags aren't supported yet
++       -- they will be used to support the
++       full-screen DGA-like mode. */
++    _DRM_HALT_ALL_QUEUES = 0x10, /**< Halt all current and future queues */
++    _DRM_HALT_CUR_QUEUES = 0x20  /**< Halt all current queues */
++};
++
++/**
++ * DRM_IOCTL_LOCK, DRM_IOCTL_UNLOCK and DRM_IOCTL_FINISH ioctl argument type.
++ *
++ * \sa drmGetLock() and drmUnlock().
++ */
++struct drm_lock {
++    int context;
++    enum drm_lock_flags flags;
++};
++
++/**
++ * DMA flags
++ *
++ * \warning
++ * These values \e must match xf86drm.h.
++ *
++ * \sa drm_dma.
++ */
++enum drm_dma_flags {
++    /* Flags for DMA buffer dispatch */
++    _DRM_DMA_BLOCK = 0x01,        /**<
++                       * Block until buffer dispatched.
++                       *
++                       * \note The buffer may not yet have
++                       * been processed by the hardware --
++                       * getting a hardware lock with the
++                       * hardware quiescent will ensure
++                       * that the buffer has been
++                       * processed.
++                       */
++    _DRM_DMA_WHILE_LOCKED = 0x02, /**< Dispatch while lock held */
++    _DRM_DMA_PRIORITY = 0x04,     /**< High priority dispatch */
++
++    /* Flags for DMA buffer request */
++    _DRM_DMA_WAIT = 0x10,         /**< Wait for free buffers */
++    _DRM_DMA_SMALLER_OK = 0x20,   /**< Smaller-than-requested buffers OK */
++    _DRM_DMA_LARGER_OK = 0x40     /**< Larger-than-requested buffers OK */
++};
++
++/**
++ * DRM_IOCTL_ADD_BUFS and DRM_IOCTL_MARK_BUFS ioctl argument type.
++ *
++ * \sa drmAddBufs().
++ */
++struct drm_buf_desc {
++    int count;       /**< Number of buffers of this size */
++    int size;        /**< Size in bytes */
++    int low_mark;        /**< Low water mark */
++    int high_mark;       /**< High water mark */
++    enum {
++        _DRM_PAGE_ALIGN = 0x01, /**< Align on page boundaries for DMA */
++        _DRM_AGP_BUFFER = 0x02, /**< Buffer is in AGP space */
++        _DRM_SG_BUFFER = 0x04,  /**< Scatter/gather memory buffer */
++        _DRM_FB_BUFFER = 0x08,  /**< Buffer is in frame buffer */
++        _DRM_PCI_BUFFER_RO = 0x10 /**< Map PCI DMA buffer read-only */
++    } flags;
++    unsigned long agp_start; /**<
++                  * Start address of where the AGP buffers are
++                  * in the AGP aperture
++                  */
++};
++
++/**
++ * DRM_IOCTL_INFO_BUFS ioctl argument type.
++ */
++struct drm_buf_info {
++    int count;      /**< Entries in list */
++    struct drm_buf_desc __user *list;
++};
++
++/**
++ * DRM_IOCTL_FREE_BUFS ioctl argument type.
++ */
++struct drm_buf_free {
++    int count;
++    int __user *list;
++};
++
++/**
++ * Buffer information
++ *
++ * \sa drm_buf_map.
++ */
++struct drm_buf_pub {
++    int idx;               /**< Index into the master buffer list */
++    int total;             /**< Buffer size */
++    int used;              /**< Amount of buffer in use (for DMA) */
++    void __user *address;          /**< Address of buffer */
++};
++
++/**
++ * DRM_IOCTL_MAP_BUFS ioctl argument type.
++ */
++struct drm_buf_map {
++    int count;      /**< Length of the buffer list */
++#ifdef __cplusplus
++    void __user *virt;
++#else
++    void __user *virtual;       /**< Mmap'd area in user-virtual */
++#endif
++    struct drm_buf_pub __user *list;    /**< Buffer information */
++};
++
++/**
++ * DRM_IOCTL_DMA ioctl argument type.
++ *
++ * Indices here refer to the offset into the buffer list in drm_buf_get.
++ *
++ * \sa drmDMA().
++ */
++struct drm_dma {
++    int context;              /**< Context handle */
++    int send_count;           /**< Number of buffers to send */
++    int __user *send_indices;     /**< List of handles to buffers */
++    int __user *send_sizes;       /**< Lengths of data to send */
++    enum drm_dma_flags flags;     /**< Flags */
++    int request_count;        /**< Number of buffers requested */
++    int request_size;         /**< Desired size for buffers */
++    int __user *request_indices;      /**< Buffer information */
++    int __user *request_sizes;
++    int granted_count;        /**< Number of buffers granted */
++};
++
++enum drm_ctx_flags {
++    _DRM_CONTEXT_PRESERVED = 0x01,
++    _DRM_CONTEXT_2DONLY = 0x02
++};
++
++/**
++ * DRM_IOCTL_ADD_CTX ioctl argument type.
++ *
++ * \sa drmCreateContext() and drmDestroyContext().
++ */
++struct drm_ctx {
++    drm_context_t handle;
++    enum drm_ctx_flags flags;
++};
++
++/**
++ * DRM_IOCTL_RES_CTX ioctl argument type.
++ */
++struct drm_ctx_res {
++    int count;
++    struct drm_ctx __user *contexts;
++};
++
++/**
++ * DRM_IOCTL_ADD_DRAW and DRM_IOCTL_RM_DRAW ioctl argument type.
++ */
++struct drm_draw {
++    drm_drawable_t handle;
++};
++
++/**
++ * DRM_IOCTL_UPDATE_DRAW ioctl argument type.
++ */
++typedef enum {
++    DRM_DRAWABLE_CLIPRECTS
++} drm_drawable_info_type_t;
++
++struct drm_update_draw {
++    drm_drawable_t handle;
++    unsigned int type;
++    unsigned int num;
++    unsigned long long data;
++};
++
++/**
++ * DRM_IOCTL_GET_MAGIC and DRM_IOCTL_AUTH_MAGIC ioctl argument type.
++ */
++struct drm_auth {
++    drm_magic_t magic;
++};
++
++/**
++ * DRM_IOCTL_IRQ_BUSID ioctl argument type.
++ *
++ * \sa drmGetInterruptFromBusID().
++ */
++struct drm_irq_busid {
++    int irq;    /**< IRQ number */
++    int busnum; /**< bus number */
++    int devnum; /**< device number */
++    int funcnum;    /**< function number */
++};
++
++enum drm_vblank_seq_type {
++    _DRM_VBLANK_ABSOLUTE = 0x0, /**< Wait for specific vblank sequence number */
++    _DRM_VBLANK_RELATIVE = 0x1, /**< Wait for given number of vblanks */
++    /* bits 1-6 are reserved for high crtcs */
++    _DRM_VBLANK_HIGH_CRTC_MASK = 0x0000003e,
++    _DRM_VBLANK_EVENT = 0x4000000,   /**< Send event instead of blocking */
++    _DRM_VBLANK_FLIP = 0x8000000,   /**< Scheduled buffer swap should flip */
++    _DRM_VBLANK_NEXTONMISS = 0x10000000,    /**< If missed, wait for next vblank */
++    _DRM_VBLANK_SECONDARY = 0x20000000, /**< Secondary display controller */
++    _DRM_VBLANK_SIGNAL = 0x40000000 /**< Send signal instead of blocking, unsupported */
++};
++#define _DRM_VBLANK_HIGH_CRTC_SHIFT 1
++
++#define _DRM_VBLANK_TYPES_MASK (_DRM_VBLANK_ABSOLUTE | _DRM_VBLANK_RELATIVE)
++#define _DRM_VBLANK_FLAGS_MASK (_DRM_VBLANK_EVENT | _DRM_VBLANK_SIGNAL | \
++                _DRM_VBLANK_SECONDARY | _DRM_VBLANK_NEXTONMISS)
++
++struct drm_wait_vblank_request {
++    enum drm_vblank_seq_type type;
++    unsigned int sequence;
++    unsigned long signal;
++};
++
++struct drm_wait_vblank_reply {
++    enum drm_vblank_seq_type type;
++    unsigned int sequence;
++    long tval_sec;
++    long tval_usec;
++};
++
++/**
++ * DRM_IOCTL_WAIT_VBLANK ioctl argument type.
++ *
++ * \sa drmWaitVBlank().
++ */
++union drm_wait_vblank {
++    struct drm_wait_vblank_request request;
++    struct drm_wait_vblank_reply reply;
++};
++
++#define _DRM_PRE_MODESET 1
++#define _DRM_POST_MODESET 2
++
++/**
++ * DRM_IOCTL_MODESET_CTL ioctl argument type
++ *
++ * \sa drmModesetCtl().
++ */
++struct drm_modeset_ctl {
++    __u32 crtc;
++    __u32 cmd;
++};
++
++/**
++ * DRM_IOCTL_AGP_ENABLE ioctl argument type.
++ *
++ * \sa drmAgpEnable().
++ */
++struct drm_agp_mode {
++    unsigned long mode; /**< AGP mode */
++};
++
++/**
++ * DRM_IOCTL_AGP_ALLOC and DRM_IOCTL_AGP_FREE ioctls argument type.
++ *
++ * \sa drmAgpAlloc() and drmAgpFree().
++ */
++struct drm_agp_buffer {
++    unsigned long size; /**< In bytes -- will round to page boundary */
++    unsigned long handle;   /**< Used for binding / unbinding */
++    unsigned long type; /**< Type of memory to allocate */
++    unsigned long physical; /**< Physical used by i810 */
++};
++
++/**
++ * DRM_IOCTL_AGP_BIND and DRM_IOCTL_AGP_UNBIND ioctls argument type.
++ *
++ * \sa drmAgpBind() and drmAgpUnbind().
++ */
++struct drm_agp_binding {
++    unsigned long handle;   /**< From drm_agp_buffer */
++    unsigned long offset;   /**< In bytes -- will round to page boundary */
++};
++
++/**
++ * DRM_IOCTL_AGP_INFO ioctl argument type.
++ *
++ * \sa drmAgpVersionMajor(), drmAgpVersionMinor(), drmAgpGetMode(),
++ * drmAgpBase(), drmAgpSize(), drmAgpMemoryUsed(), drmAgpMemoryAvail(),
++ * drmAgpVendorId() and drmAgpDeviceId().
++ */
++struct drm_agp_info {
++    int agp_version_major;
++    int agp_version_minor;
++    unsigned long mode;
++    unsigned long aperture_base;    /* physical address */
++    unsigned long aperture_size;    /* bytes */
++    unsigned long memory_allowed;   /* bytes */
++    unsigned long memory_used;
++
++    /* PCI information */
++    unsigned short id_vendor;
++    unsigned short id_device;
++};
++
++/**
++ * DRM_IOCTL_SG_ALLOC ioctl argument type.
++ */
++struct drm_scatter_gather {
++    unsigned long size; /**< In bytes -- will round to page boundary */
++    unsigned long handle;   /**< Used for mapping / unmapping */
++};
++
++/**
++ * DRM_IOCTL_SET_VERSION ioctl argument type.
++ */
++struct drm_set_version {
++    int drm_di_major;
++    int drm_di_minor;
++    int drm_dd_major;
++    int drm_dd_minor;
++};
++
++/** DRM_IOCTL_GEM_CLOSE ioctl argument type */
++struct drm_gem_close {
++    /** Handle of the object to be closed. */
++    __u32 handle;
++    __u32 pad;
++};
++
++/** DRM_IOCTL_GEM_FLINK ioctl argument type */
++struct drm_gem_flink {
++    /** Handle for the object being named */
++    __u32 handle;
++
++    /** Returned global name */
++    __u32 name;
++};
++
++/** DRM_IOCTL_GEM_OPEN ioctl argument type */
++struct drm_gem_open {
++    /** Name of object being opened */
++    __u32 name;
++
++    /** Returned handle for the object */
++    __u32 handle;
++
++    /** Returned size of the object */
++    __u64 size;
++};
++
++#define DRM_CAP_DUMB_BUFFER     0x1
++#define DRM_CAP_VBLANK_HIGH_CRTC    0x2
++#define DRM_CAP_DUMB_PREFERRED_DEPTH    0x3
++#define DRM_CAP_DUMB_PREFER_SHADOW  0x4
++#define DRM_CAP_PRIME           0x5
++#define  DRM_PRIME_CAP_IMPORT       0x1
++#define  DRM_PRIME_CAP_EXPORT       0x2
++#define DRM_CAP_TIMESTAMP_MONOTONIC 0x6
++#define DRM_CAP_ASYNC_PAGE_FLIP     0x7
++/*
++ * The CURSOR_WIDTH and CURSOR_HEIGHT capabilities return a valid widthxheight
++ * combination for the hardware cursor. The intention is that a hardware
++ * agnostic userspace can query a cursor plane size to use.
++ *
++ * Note that the cross-driver contract is to merely return a valid size;
++ * drivers are free to attach another meaning on top, eg. i915 returns the
++ * maximum plane size.
++ */
++#define DRM_CAP_CURSOR_WIDTH        0x8
++#define DRM_CAP_CURSOR_HEIGHT       0x9
++#define DRM_CAP_ADDFB2_MODIFIERS    0x10
++#define DRM_CAP_PAGE_FLIP_TARGET    0x11
++#define DRM_CAP_CRTC_IN_VBLANK_EVENT    0x12
++#define DRM_CAP_SYNCOBJ     0x13
++
++/** DRM_IOCTL_GET_CAP ioctl argument type */
++struct drm_get_cap {
++    __u64 capability;
++    __u64 value;
++};
++
++/**
++ * DRM_CLIENT_CAP_STEREO_3D
++ *
++ * if set to 1, the DRM core will expose the stereo 3D capabilities of the
++ * monitor by advertising the supported 3D layouts in the flags of struct
++ * drm_mode_modeinfo.
++ */
++#define DRM_CLIENT_CAP_STEREO_3D    1
++
++/**
++ * DRM_CLIENT_CAP_UNIVERSAL_PLANES
++ *
++ * If set to 1, the DRM core will expose all planes (overlay, primary, and
++ * cursor) to userspace.
++ */
++#define DRM_CLIENT_CAP_UNIVERSAL_PLANES  2
++
++/**
++ * DRM_CLIENT_CAP_ATOMIC
++ *
++ * If set to 1, the DRM core will expose atomic properties to userspace
++ */
++#define DRM_CLIENT_CAP_ATOMIC   3
++
++/**
++ * DRM_CLIENT_CAP_ASPECT_RATIO
++ *
++ * If set to 1, the DRM core will provide aspect ratio information in modes.
++ */
++#define DRM_CLIENT_CAP_ASPECT_RATIO    4
++
++/**
++ * DRM_CLIENT_CAP_WRITEBACK_CONNECTORS
++ *
++ * If set to 1, the DRM core will expose special connectors to be used for
++ * writing back to memory the scene setup in the commit. Depends on client
++ * also supporting DRM_CLIENT_CAP_ATOMIC
++ */
++#define DRM_CLIENT_CAP_WRITEBACK_CONNECTORS 5
++
++/*
++ * DRM_CLIENT_CAP_SHARE_PLANES
++ *
++ * If set to 1, the DRM core will expose share planes to userspace.
++ */
++#define DRM_CLIENT_CAP_SHARE_PLANES 6
++
++/** DRM_IOCTL_SET_CLIENT_CAP ioctl argument type */
++struct drm_set_client_cap {
++    __u64 capability;
++    __u64 value;
++};
++
++#define DRM_RDWR O_RDWR
++#define DRM_CLOEXEC O_CLOEXEC
++struct drm_prime_handle {
++    __u32 handle;
++
++    /** Flags.. only applicable for handle->fd */
++    __u32 flags;
++
++    /** Returned dmabuf file descriptor */
++    __s32 fd;
++};
++
++struct drm_syncobj_create {
++    __u32 handle;
++#define DRM_SYNCOBJ_CREATE_SIGNALED (1 << 0)
++    __u32 flags;
++};
++
++struct drm_syncobj_destroy {
++    __u32 handle;
++    __u32 pad;
++};
++
++#define DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE (1 << 0)
++#define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE (1 << 0)
++struct drm_syncobj_handle {
++    __u32 handle;
++    __u32 flags;
++
++    __s32 fd;
++    __u32 pad;
++};
++
++#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL (1 << 0)
++#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT (1 << 1)
++struct drm_syncobj_wait {
++    __u64 handles;
++    /* absolute timeout */
++    __s64 timeout_nsec;
++    __u32 count_handles;
++    __u32 flags;
++    __u32 first_signaled; /* only valid when not waiting all */
++    __u32 pad;
++};
++
++struct drm_syncobj_array {
++    __u64 handles;
++    __u32 count_handles;
++    __u32 pad;
++};
++
++/* Query current scanout sequence number */
++struct drm_crtc_get_sequence {
++    __u32 crtc_id;      /* requested crtc_id */
++    __u32 active;       /* return: crtc output is active */
++    __u64 sequence;     /* return: most recent vblank sequence */
++    __s64 sequence_ns;  /* return: most recent time of first pixel out */
++};
++
++/* Queue event to be delivered at specified sequence. Time stamp marks
++ * when the first pixel of the refresh cycle leaves the display engine
++ * for the display
++ */
++#define DRM_CRTC_SEQUENCE_RELATIVE      0x00000001  /* sequence is relative to current */
++#define DRM_CRTC_SEQUENCE_NEXT_ON_MISS      0x00000002  /* Use next sequence if we've missed */
++
++struct drm_crtc_queue_sequence {
++    __u32 crtc_id;
++    __u32 flags;
++    __u64 sequence;     /* on input, target sequence. on output, actual sequence */
++    __u64 user_data;    /* user data passed to event */
++};
++
++#if defined(__cplusplus)
++}
++#endif
++
++#include "drm_mode.h"
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#define DRM_IOCTL_BASE          'd'
++#define DRM_IO(nr)          _IO(DRM_IOCTL_BASE,nr)
++#define DRM_IOR(nr,type)        _IOR(DRM_IOCTL_BASE,nr,type)
++#define DRM_IOW(nr,type)        _IOW(DRM_IOCTL_BASE,nr,type)
++#define DRM_IOWR(nr,type)       _IOWR(DRM_IOCTL_BASE,nr,type)
++
++#define DRM_IOCTL_VERSION       DRM_IOWR(0x00, struct drm_version)
++#define DRM_IOCTL_GET_UNIQUE        DRM_IOWR(0x01, struct drm_unique)
++#define DRM_IOCTL_GET_MAGIC     DRM_IOR( 0x02, struct drm_auth)
++#define DRM_IOCTL_IRQ_BUSID     DRM_IOWR(0x03, struct drm_irq_busid)
++#define DRM_IOCTL_GET_MAP               DRM_IOWR(0x04, struct drm_map)
++#define DRM_IOCTL_GET_CLIENT            DRM_IOWR(0x05, struct drm_client)
++#define DRM_IOCTL_GET_STATS             DRM_IOR( 0x06, struct drm_stats)
++#define DRM_IOCTL_SET_VERSION       DRM_IOWR(0x07, struct drm_set_version)
++#define DRM_IOCTL_MODESET_CTL           DRM_IOW(0x08, struct drm_modeset_ctl)
++#define DRM_IOCTL_GEM_CLOSE     DRM_IOW (0x09, struct drm_gem_close)
++#define DRM_IOCTL_GEM_FLINK     DRM_IOWR(0x0a, struct drm_gem_flink)
++#define DRM_IOCTL_GEM_OPEN      DRM_IOWR(0x0b, struct drm_gem_open)
++#define DRM_IOCTL_GET_CAP       DRM_IOWR(0x0c, struct drm_get_cap)
++#define DRM_IOCTL_SET_CLIENT_CAP    DRM_IOW( 0x0d, struct drm_set_client_cap)
++
++#define DRM_IOCTL_SET_UNIQUE        DRM_IOW( 0x10, struct drm_unique)
++#define DRM_IOCTL_AUTH_MAGIC        DRM_IOW( 0x11, struct drm_auth)
++#define DRM_IOCTL_BLOCK         DRM_IOWR(0x12, struct drm_block)
++#define DRM_IOCTL_UNBLOCK       DRM_IOWR(0x13, struct drm_block)
++#define DRM_IOCTL_CONTROL       DRM_IOW( 0x14, struct drm_control)
++#define DRM_IOCTL_ADD_MAP       DRM_IOWR(0x15, struct drm_map)
++#define DRM_IOCTL_ADD_BUFS      DRM_IOWR(0x16, struct drm_buf_desc)
++#define DRM_IOCTL_MARK_BUFS     DRM_IOW( 0x17, struct drm_buf_desc)
++#define DRM_IOCTL_INFO_BUFS     DRM_IOWR(0x18, struct drm_buf_info)
++#define DRM_IOCTL_MAP_BUFS      DRM_IOWR(0x19, struct drm_buf_map)
++#define DRM_IOCTL_FREE_BUFS     DRM_IOW( 0x1a, struct drm_buf_free)
++
++#define DRM_IOCTL_RM_MAP        DRM_IOW( 0x1b, struct drm_map)
++
++#define DRM_IOCTL_SET_SAREA_CTX     DRM_IOW( 0x1c, struct drm_ctx_priv_map)
++#define DRM_IOCTL_GET_SAREA_CTX     DRM_IOWR(0x1d, struct drm_ctx_priv_map)
++
++#define DRM_IOCTL_SET_MASTER            DRM_IO(0x1e)
++#define DRM_IOCTL_DROP_MASTER           DRM_IO(0x1f)
++
++#define DRM_IOCTL_ADD_CTX       DRM_IOWR(0x20, struct drm_ctx)
++#define DRM_IOCTL_RM_CTX        DRM_IOWR(0x21, struct drm_ctx)
++#define DRM_IOCTL_MOD_CTX       DRM_IOW( 0x22, struct drm_ctx)
++#define DRM_IOCTL_GET_CTX       DRM_IOWR(0x23, struct drm_ctx)
++#define DRM_IOCTL_SWITCH_CTX        DRM_IOW( 0x24, struct drm_ctx)
++#define DRM_IOCTL_NEW_CTX       DRM_IOW( 0x25, struct drm_ctx)
++#define DRM_IOCTL_RES_CTX       DRM_IOWR(0x26, struct drm_ctx_res)
++#define DRM_IOCTL_ADD_DRAW      DRM_IOWR(0x27, struct drm_draw)
++#define DRM_IOCTL_RM_DRAW       DRM_IOWR(0x28, struct drm_draw)
++#define DRM_IOCTL_DMA           DRM_IOWR(0x29, struct drm_dma)
++#define DRM_IOCTL_LOCK          DRM_IOW( 0x2a, struct drm_lock)
++#define DRM_IOCTL_UNLOCK        DRM_IOW( 0x2b, struct drm_lock)
++#define DRM_IOCTL_FINISH        DRM_IOW( 0x2c, struct drm_lock)
++
++#define DRM_IOCTL_PRIME_HANDLE_TO_FD    DRM_IOWR(0x2d, struct drm_prime_handle)
++#define DRM_IOCTL_PRIME_FD_TO_HANDLE    DRM_IOWR(0x2e, struct drm_prime_handle)
++
++#define DRM_IOCTL_AGP_ACQUIRE       DRM_IO(  0x30)
++#define DRM_IOCTL_AGP_RELEASE       DRM_IO(  0x31)
++#define DRM_IOCTL_AGP_ENABLE        DRM_IOW( 0x32, struct drm_agp_mode)
++#define DRM_IOCTL_AGP_INFO      DRM_IOR( 0x33, struct drm_agp_info)
++#define DRM_IOCTL_AGP_ALLOC     DRM_IOWR(0x34, struct drm_agp_buffer)
++#define DRM_IOCTL_AGP_FREE      DRM_IOW( 0x35, struct drm_agp_buffer)
++#define DRM_IOCTL_AGP_BIND      DRM_IOW( 0x36, struct drm_agp_binding)
++#define DRM_IOCTL_AGP_UNBIND        DRM_IOW( 0x37, struct drm_agp_binding)
++
++#define DRM_IOCTL_SG_ALLOC      DRM_IOWR(0x38, struct drm_scatter_gather)
++#define DRM_IOCTL_SG_FREE       DRM_IOW( 0x39, struct drm_scatter_gather)
++
++#define DRM_IOCTL_WAIT_VBLANK       DRM_IOWR(0x3a, union drm_wait_vblank)
++
++#define DRM_IOCTL_CRTC_GET_SEQUENCE DRM_IOWR(0x3b, struct drm_crtc_get_sequence)
++#define DRM_IOCTL_CRTC_QUEUE_SEQUENCE   DRM_IOWR(0x3c, struct drm_crtc_queue_sequence)
++
++#define DRM_IOCTL_UPDATE_DRAW       DRM_IOW(0x3f, struct drm_update_draw)
++
++#define DRM_IOCTL_MODE_GETRESOURCES DRM_IOWR(0xA0, struct drm_mode_card_res)
++#define DRM_IOCTL_MODE_GETCRTC      DRM_IOWR(0xA1, struct drm_mode_crtc)
++#define DRM_IOCTL_MODE_SETCRTC      DRM_IOWR(0xA2, struct drm_mode_crtc)
++#define DRM_IOCTL_MODE_CURSOR       DRM_IOWR(0xA3, struct drm_mode_cursor)
++#define DRM_IOCTL_MODE_GETGAMMA     DRM_IOWR(0xA4, struct drm_mode_crtc_lut)
++#define DRM_IOCTL_MODE_SETGAMMA     DRM_IOWR(0xA5, struct drm_mode_crtc_lut)
++#define DRM_IOCTL_MODE_GETENCODER   DRM_IOWR(0xA6, struct drm_mode_get_encoder)
++#define DRM_IOCTL_MODE_GETCONNECTOR DRM_IOWR(0xA7, struct drm_mode_get_connector)
++#define DRM_IOCTL_MODE_ATTACHMODE   DRM_IOWR(0xA8, struct drm_mode_mode_cmd) /* deprecated (never worked) */
++#define DRM_IOCTL_MODE_DETACHMODE   DRM_IOWR(0xA9, struct drm_mode_mode_cmd) /* deprecated (never worked) */
++
++#define DRM_IOCTL_MODE_GETPROPERTY  DRM_IOWR(0xAA, struct drm_mode_get_property)
++#define DRM_IOCTL_MODE_SETPROPERTY  DRM_IOWR(0xAB, struct drm_mode_connector_set_property)
++#define DRM_IOCTL_MODE_GETPROPBLOB  DRM_IOWR(0xAC, struct drm_mode_get_blob)
++#define DRM_IOCTL_MODE_GETFB        DRM_IOWR(0xAD, struct drm_mode_fb_cmd)
++#define DRM_IOCTL_MODE_ADDFB        DRM_IOWR(0xAE, struct drm_mode_fb_cmd)
++#define DRM_IOCTL_MODE_RMFB     DRM_IOWR(0xAF, unsigned int)
++#define DRM_IOCTL_MODE_PAGE_FLIP    DRM_IOWR(0xB0, struct drm_mode_crtc_page_flip)
++#define DRM_IOCTL_MODE_DIRTYFB      DRM_IOWR(0xB1, struct drm_mode_fb_dirty_cmd)
++
++#define DRM_IOCTL_MODE_CREATE_DUMB DRM_IOWR(0xB2, struct drm_mode_create_dumb)
++#define DRM_IOCTL_MODE_MAP_DUMB    DRM_IOWR(0xB3, struct drm_mode_map_dumb)
++#define DRM_IOCTL_MODE_DESTROY_DUMB    DRM_IOWR(0xB4, struct drm_mode_destroy_dumb)
++#define DRM_IOCTL_MODE_GETPLANERESOURCES DRM_IOWR(0xB5, struct drm_mode_get_plane_res)
++#define DRM_IOCTL_MODE_GETPLANE DRM_IOWR(0xB6, struct drm_mode_get_plane)
++#define DRM_IOCTL_MODE_SETPLANE DRM_IOWR(0xB7, struct drm_mode_set_plane)
++#define DRM_IOCTL_MODE_ADDFB2       DRM_IOWR(0xB8, struct drm_mode_fb_cmd2)
++#define DRM_IOCTL_MODE_OBJ_GETPROPERTIES    DRM_IOWR(0xB9, struct drm_mode_obj_get_properties)
++#define DRM_IOCTL_MODE_OBJ_SETPROPERTY  DRM_IOWR(0xBA, struct drm_mode_obj_set_property)
++#define DRM_IOCTL_MODE_CURSOR2      DRM_IOWR(0xBB, struct drm_mode_cursor2)
++#define DRM_IOCTL_MODE_ATOMIC       DRM_IOWR(0xBC, struct drm_mode_atomic)
++#define DRM_IOCTL_MODE_CREATEPROPBLOB   DRM_IOWR(0xBD, struct drm_mode_create_blob)
++#define DRM_IOCTL_MODE_DESTROYPROPBLOB  DRM_IOWR(0xBE, struct drm_mode_destroy_blob)
++
++#define DRM_IOCTL_SYNCOBJ_CREATE    DRM_IOWR(0xBF, struct drm_syncobj_create)
++#define DRM_IOCTL_SYNCOBJ_DESTROY   DRM_IOWR(0xC0, struct drm_syncobj_destroy)
++#define DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD  DRM_IOWR(0xC1, struct drm_syncobj_handle)
++#define DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE  DRM_IOWR(0xC2, struct drm_syncobj_handle)
++#define DRM_IOCTL_SYNCOBJ_WAIT      DRM_IOWR(0xC3, struct drm_syncobj_wait)
++#define DRM_IOCTL_SYNCOBJ_RESET     DRM_IOWR(0xC4, struct drm_syncobj_array)
++#define DRM_IOCTL_SYNCOBJ_SIGNAL    DRM_IOWR(0xC5, struct drm_syncobj_array)
++
++#define DRM_IOCTL_MODE_CREATE_LEASE DRM_IOWR(0xC6, struct drm_mode_create_lease)
++#define DRM_IOCTL_MODE_LIST_LESSEES DRM_IOWR(0xC7, struct drm_mode_list_lessees)
++#define DRM_IOCTL_MODE_GET_LEASE    DRM_IOWR(0xC8, struct drm_mode_get_lease)
++#define DRM_IOCTL_MODE_REVOKE_LEASE DRM_IOWR(0xC9, struct drm_mode_revoke_lease)
++
++/**
++ * Device specific ioctls should only be in their respective headers
++ * The device specific ioctl range is from 0x40 to 0x9f.
++ * Generic IOCTLS restart at 0xA0.
++ *
++ * \sa drmCommandNone(), drmCommandRead(), drmCommandWrite(), and
++ * drmCommandReadWrite().
++ */
++#define DRM_COMMAND_BASE                0x40
++#define DRM_COMMAND_END         0xA0
++
++/**
++ * Header for events written back to userspace on the drm fd.  The
++ * type defines the type of event, the length specifies the total
++ * length of the event (including the header), and user_data is
++ * typically a 64 bit value passed with the ioctl that triggered the
++ * event.  A read on the drm fd will always only return complete
++ * events, that is, if for example the read buffer is 100 bytes, and
++ * there are two 64 byte events pending, only one will be returned.
++ *
++ * Event types 0 - 0x7fffffff are generic drm events, 0x80000000 and
++ * up are chipset specific.
++ */
++struct drm_event {
++    __u32 type;
++    __u32 length;
++};
++
++#define DRM_EVENT_VBLANK 0x01
++#define DRM_EVENT_FLIP_COMPLETE 0x02
++#define DRM_EVENT_CRTC_SEQUENCE 0x03
++
++struct drm_event_vblank {
++    struct drm_event base;
++    __u64 user_data;
++    __u32 tv_sec;
++    __u32 tv_usec;
++    __u32 sequence;
++    __u32 crtc_id; /* 0 on older kernels that do not support this */
++};
++
++/* Event delivered at sequence. Time stamp marks when the first pixel
++ * of the refresh cycle leaves the display engine for the display
++ */
++struct drm_event_crtc_sequence {
++    struct drm_event    base;
++    __u64           user_data;
++    __s64           time_ns;
++    __u64           sequence;
++};
++
++/* typedef area */
++#ifndef __KERNEL__
++typedef struct drm_clip_rect drm_clip_rect_t;
++typedef struct drm_drawable_info drm_drawable_info_t;
++typedef struct drm_tex_region drm_tex_region_t;
++typedef struct drm_hw_lock drm_hw_lock_t;
++typedef struct drm_version drm_version_t;
++typedef struct drm_unique drm_unique_t;
++typedef struct drm_list drm_list_t;
++typedef struct drm_block drm_block_t;
++typedef struct drm_control drm_control_t;
++typedef enum drm_map_type drm_map_type_t;
++typedef enum drm_map_flags drm_map_flags_t;
++typedef struct drm_ctx_priv_map drm_ctx_priv_map_t;
++typedef struct drm_map drm_map_t;
++typedef struct drm_client drm_client_t;
++typedef enum drm_stat_type drm_stat_type_t;
++typedef struct drm_stats drm_stats_t;
++typedef enum drm_lock_flags drm_lock_flags_t;
++typedef struct drm_lock drm_lock_t;
++typedef enum drm_dma_flags drm_dma_flags_t;
++typedef struct drm_buf_desc drm_buf_desc_t;
++typedef struct drm_buf_info drm_buf_info_t;
++typedef struct drm_buf_free drm_buf_free_t;
++typedef struct drm_buf_pub drm_buf_pub_t;
++typedef struct drm_buf_map drm_buf_map_t;
++typedef struct drm_dma drm_dma_t;
++typedef union drm_wait_vblank drm_wait_vblank_t;
++typedef struct drm_agp_mode drm_agp_mode_t;
++typedef enum drm_ctx_flags drm_ctx_flags_t;
++typedef struct drm_ctx drm_ctx_t;
++typedef struct drm_ctx_res drm_ctx_res_t;
++typedef struct drm_draw drm_draw_t;
++typedef struct drm_update_draw drm_update_draw_t;
++typedef struct drm_auth drm_auth_t;
++typedef struct drm_irq_busid drm_irq_busid_t;
++typedef enum drm_vblank_seq_type drm_vblank_seq_type_t;
++
++typedef struct drm_agp_buffer drm_agp_buffer_t;
++typedef struct drm_agp_binding drm_agp_binding_t;
++typedef struct drm_agp_info drm_agp_info_t;
++typedef struct drm_scatter_gather drm_scatter_gather_t;
++typedef struct drm_set_version drm_set_version_t;
++#endif
++
++#if defined(__cplusplus)
++}
++#endif
++
++#endif
+diff --git a/component/osal/include/sculptor/linux/drm_fourcc.h b/component/osal/include/sculptor/linux/drm_fourcc.h
+new file mode 100755
+index 0000000..3b63bc1
+--- /dev/null
++++ b/component/osal/include/sculptor/linux/drm_fourcc.h
+@@ -0,0 +1,786 @@
++/*
++ * Copyright 2011 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * VA LINUX SYSTEMS AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#ifndef DRM_FOURCC_H
++#define DRM_FOURCC_H
++
++#include "drm.h"
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++/**
++ * DOC: overview
++ *
++ * In the DRM subsystem, framebuffer pixel formats are described using the
++ * fourcc codes defined in `include/uapi/drm/drm_fourcc.h`. In addition to the
++ * fourcc code, a Format Modifier may optionally be provided, in order to
++ * further describe the buffer's format - for example tiling or compression.
++ *
++ * Format Modifiers
++ * ----------------
++ *
++ * Format modifiers are used in conjunction with a fourcc code, forming a
++ * unique fourcc:modifier pair. This format:modifier pair must fully define the
++ * format and data layout of the buffer, and should be the only way to describe
++ * that particular buffer.
++ *
++ * Having multiple fourcc:modifier pairs which describe the same layout should
++ * be avoided, as such aliases run the risk of different drivers exposing
++ * different names for the same data format, forcing userspace to understand
++ * that they are aliases.
++ *
++ * Format modifiers may change any property of the buffer, including the number
++ * of planes and/or the required allocation size. Format modifiers are
++ * vendor-namespaced, and as such the relationship between a fourcc code and a
++ * modifier is specific to the modifer being used. For example, some modifiers
++ * may preserve meaning - such as number of planes - from the fourcc code,
++ * whereas others may not.
++ *
++ * Vendors should document their modifier usage in as much detail as
++ * possible, to ensure maximum compatibility across devices, drivers and
++ * applications.
++ *
++ * The authoritative list of format modifier codes is found in
++ * `include/uapi/drm/drm_fourcc.h`
++ */
++
++#define fourcc_code(a, b, c, d) ((__u32)(a) | ((__u32)(b) << 8) | \
++				 ((__u32)(c) << 16) | ((__u32)(d) << 24))
++
++#define DRM_FORMAT_BIG_ENDIAN (1<<31) /* format is big endian instead of little endian */
++
++/* Reserve 0 for the invalid format specifier */
++#define DRM_FORMAT_INVALID	0
++
++/* color index */
++#define DRM_FORMAT_C8		fourcc_code('C', '8', ' ', ' ') /* [7:0] C */
++
++/* 8 bpp Red */
++#define DRM_FORMAT_R8		fourcc_code('R', '8', ' ', ' ') /* [7:0] R */
++
++/* 16 bpp Red */
++#define DRM_FORMAT_R16		fourcc_code('R', '1', '6', ' ') /* [15:0] R little endian */
++
++/* 16 bpp RG */
++#define DRM_FORMAT_RG88		fourcc_code('R', 'G', '8', '8') /* [15:0] R:G 8:8 little endian */
++#define DRM_FORMAT_GR88		fourcc_code('G', 'R', '8', '8') /* [15:0] G:R 8:8 little endian */
++
++/* 32 bpp RG */
++#define DRM_FORMAT_RG1616	fourcc_code('R', 'G', '3', '2') /* [31:0] R:G 16:16 little endian */
++#define DRM_FORMAT_GR1616	fourcc_code('G', 'R', '3', '2') /* [31:0] G:R 16:16 little endian */
++
++/* 8 bpp RGB */
++#define DRM_FORMAT_RGB332	fourcc_code('R', 'G', 'B', '8') /* [7:0] R:G:B 3:3:2 */
++#define DRM_FORMAT_BGR233	fourcc_code('B', 'G', 'R', '8') /* [7:0] B:G:R 2:3:3 */
++
++/* 16 bpp RGB */
++#define DRM_FORMAT_XRGB4444	fourcc_code('X', 'R', '1', '2') /* [15:0] x:R:G:B 4:4:4:4 little endian */
++#define DRM_FORMAT_XBGR4444	fourcc_code('X', 'B', '1', '2') /* [15:0] x:B:G:R 4:4:4:4 little endian */
++#define DRM_FORMAT_RGBX4444	fourcc_code('R', 'X', '1', '2') /* [15:0] R:G:B:x 4:4:4:4 little endian */
++#define DRM_FORMAT_BGRX4444	fourcc_code('B', 'X', '1', '2') /* [15:0] B:G:R:x 4:4:4:4 little endian */
++
++#define DRM_FORMAT_ARGB4444	fourcc_code('A', 'R', '1', '2') /* [15:0] A:R:G:B 4:4:4:4 little endian */
++#define DRM_FORMAT_ABGR4444	fourcc_code('A', 'B', '1', '2') /* [15:0] A:B:G:R 4:4:4:4 little endian */
++#define DRM_FORMAT_RGBA4444	fourcc_code('R', 'A', '1', '2') /* [15:0] R:G:B:A 4:4:4:4 little endian */
++#define DRM_FORMAT_BGRA4444	fourcc_code('B', 'A', '1', '2') /* [15:0] B:G:R:A 4:4:4:4 little endian */
++
++#define DRM_FORMAT_XRGB1555	fourcc_code('X', 'R', '1', '5') /* [15:0] x:R:G:B 1:5:5:5 little endian */
++#define DRM_FORMAT_XBGR1555	fourcc_code('X', 'B', '1', '5') /* [15:0] x:B:G:R 1:5:5:5 little endian */
++#define DRM_FORMAT_RGBX5551	fourcc_code('R', 'X', '1', '5') /* [15:0] R:G:B:x 5:5:5:1 little endian */
++#define DRM_FORMAT_BGRX5551	fourcc_code('B', 'X', '1', '5') /* [15:0] B:G:R:x 5:5:5:1 little endian */
++
++#define DRM_FORMAT_ARGB1555	fourcc_code('A', 'R', '1', '5') /* [15:0] A:R:G:B 1:5:5:5 little endian */
++#define DRM_FORMAT_ABGR1555	fourcc_code('A', 'B', '1', '5') /* [15:0] A:B:G:R 1:5:5:5 little endian */
++#define DRM_FORMAT_RGBA5551	fourcc_code('R', 'A', '1', '5') /* [15:0] R:G:B:A 5:5:5:1 little endian */
++#define DRM_FORMAT_BGRA5551	fourcc_code('B', 'A', '1', '5') /* [15:0] B:G:R:A 5:5:5:1 little endian */
++
++#define DRM_FORMAT_RGB565	fourcc_code('R', 'G', '1', '6') /* [15:0] R:G:B 5:6:5 little endian */
++#define DRM_FORMAT_BGR565	fourcc_code('B', 'G', '1', '6') /* [15:0] B:G:R 5:6:5 little endian */
++
++/* 24 bpp RGB */
++#define DRM_FORMAT_RGB888	fourcc_code('R', 'G', '2', '4') /* [23:0] R:G:B little endian */
++#define DRM_FORMAT_BGR888	fourcc_code('B', 'G', '2', '4') /* [23:0] B:G:R little endian */
++
++/* 32 bpp RGB */
++#define DRM_FORMAT_XRGB8888	fourcc_code('X', 'R', '2', '4') /* [31:0] x:R:G:B 8:8:8:8 little endian */
++#define DRM_FORMAT_XBGR8888	fourcc_code('X', 'B', '2', '4') /* [31:0] x:B:G:R 8:8:8:8 little endian */
++#define DRM_FORMAT_RGBX8888	fourcc_code('R', 'X', '2', '4') /* [31:0] R:G:B:x 8:8:8:8 little endian */
++#define DRM_FORMAT_BGRX8888	fourcc_code('B', 'X', '2', '4') /* [31:0] B:G:R:x 8:8:8:8 little endian */
++
++#define DRM_FORMAT_ARGB8888	fourcc_code('A', 'R', '2', '4') /* [31:0] A:R:G:B 8:8:8:8 little endian */
++#define DRM_FORMAT_ABGR8888	fourcc_code('A', 'B', '2', '4') /* [31:0] A:B:G:R 8:8:8:8 little endian */
++#define DRM_FORMAT_RGBA8888	fourcc_code('R', 'A', '2', '4') /* [31:0] R:G:B:A 8:8:8:8 little endian */
++#define DRM_FORMAT_BGRA8888	fourcc_code('B', 'A', '2', '4') /* [31:0] B:G:R:A 8:8:8:8 little endian */
++
++#define DRM_FORMAT_XRGB2101010	fourcc_code('X', 'R', '3', '0') /* [31:0] x:R:G:B 2:10:10:10 little endian */
++#define DRM_FORMAT_XBGR2101010	fourcc_code('X', 'B', '3', '0') /* [31:0] x:B:G:R 2:10:10:10 little endian */
++#define DRM_FORMAT_RGBX1010102	fourcc_code('R', 'X', '3', '0') /* [31:0] R:G:B:x 10:10:10:2 little endian */
++#define DRM_FORMAT_BGRX1010102	fourcc_code('B', 'X', '3', '0') /* [31:0] B:G:R:x 10:10:10:2 little endian */
++
++#define DRM_FORMAT_ARGB2101010	fourcc_code('A', 'R', '3', '0') /* [31:0] A:R:G:B 2:10:10:10 little endian */
++#define DRM_FORMAT_ABGR2101010	fourcc_code('A', 'B', '3', '0') /* [31:0] A:B:G:R 2:10:10:10 little endian */
++#define DRM_FORMAT_RGBA1010102	fourcc_code('R', 'A', '3', '0') /* [31:0] R:G:B:A 10:10:10:2 little endian */
++#define DRM_FORMAT_BGRA1010102	fourcc_code('B', 'A', '3', '0') /* [31:0] B:G:R:A 10:10:10:2 little endian */
++
++/*
++ * Floating point 64bpp RGB
++ * IEEE 754-2008 binary16 half-precision float
++ * [15:0] sign:exponent:mantissa 1:5:10
++ */
++#define DRM_FORMAT_XRGB16161616F fourcc_code('X', 'R', '4', 'H') /* [63:0] x:R:G:B 16:16:16:16 little endian */
++#define DRM_FORMAT_XBGR16161616F fourcc_code('X', 'B', '4', 'H') /* [63:0] x:B:G:R 16:16:16:16 little endian */
++
++#define DRM_FORMAT_ARGB16161616F fourcc_code('A', 'R', '4', 'H') /* [63:0] A:R:G:B 16:16:16:16 little endian */
++#define DRM_FORMAT_ABGR16161616F fourcc_code('A', 'B', '4', 'H') /* [63:0] A:B:G:R 16:16:16:16 little endian */
++
++/* packed YCbCr */
++#define DRM_FORMAT_YUYV		fourcc_code('Y', 'U', 'Y', 'V') /* [31:0] Cr0:Y1:Cb0:Y0 8:8:8:8 little endian */
++#define DRM_FORMAT_YVYU		fourcc_code('Y', 'V', 'Y', 'U') /* [31:0] Cb0:Y1:Cr0:Y0 8:8:8:8 little endian */
++#define DRM_FORMAT_UYVY		fourcc_code('U', 'Y', 'V', 'Y') /* [31:0] Y1:Cr0:Y0:Cb0 8:8:8:8 little endian */
++#define DRM_FORMAT_VYUY		fourcc_code('V', 'Y', 'U', 'Y') /* [31:0] Y1:Cb0:Y0:Cr0 8:8:8:8 little endian */
++
++#define DRM_FORMAT_AYUV		fourcc_code('A', 'Y', 'U', 'V') /* [31:0] A:Y:Cb:Cr 8:8:8:8 little endian */
++#define DRM_FORMAT_XYUV8888	fourcc_code('X', 'Y', 'U', 'V') /* [31:0] X:Y:Cb:Cr 8:8:8:8 little endian */
++#define DRM_FORMAT_VUY888	fourcc_code('V', 'U', '2', '4') /* [23:0] Cr:Cb:Y 8:8:8 little endian */
++#define DRM_FORMAT_VUY101010	fourcc_code('V', 'U', '3', '0') /* Y followed by U then V, 10:10:10. Non-linear modifier only */
++
++/*
++ * packed Y2xx indicate for each component, xx valid data occupy msb
++ * 16-xx padding occupy lsb
++ */
++#define DRM_FORMAT_Y210         fourcc_code('Y', '2', '1', '0') /* [63:0] Cr0:0:Y1:0:Cb0:0:Y0:0 10:6:10:6:10:6:10:6 little endian per 2 Y pixels */
++#define DRM_FORMAT_Y212         fourcc_code('Y', '2', '1', '2') /* [63:0] Cr0:0:Y1:0:Cb0:0:Y0:0 12:4:12:4:12:4:12:4 little endian per 2 Y pixels */
++#define DRM_FORMAT_Y216         fourcc_code('Y', '2', '1', '6') /* [63:0] Cr0:Y1:Cb0:Y0 16:16:16:16 little endian per 2 Y pixels */
++
++/*
++ * packed Y4xx indicate for each component, xx valid data occupy msb
++ * 16-xx padding occupy lsb except Y410
++ */
++#define DRM_FORMAT_Y410         fourcc_code('Y', '4', '1', '0') /* [31:0] A:Cr:Y:Cb 2:10:10:10 little endian */
++#define DRM_FORMAT_Y412         fourcc_code('Y', '4', '1', '2') /* [63:0] A:0:Cr:0:Y:0:Cb:0 12:4:12:4:12:4:12:4 little endian */
++#define DRM_FORMAT_Y416         fourcc_code('Y', '4', '1', '6') /* [63:0] A:Cr:Y:Cb 16:16:16:16 little endian */
++
++#define DRM_FORMAT_XVYU2101010	fourcc_code('X', 'V', '3', '0') /* [31:0] X:Cr:Y:Cb 2:10:10:10 little endian */
++#define DRM_FORMAT_XVYU12_16161616	fourcc_code('X', 'V', '3', '6') /* [63:0] X:0:Cr:0:Y:0:Cb:0 12:4:12:4:12:4:12:4 little endian */
++#define DRM_FORMAT_XVYU16161616	fourcc_code('X', 'V', '4', '8') /* [63:0] X:Cr:Y:Cb 16:16:16:16 little endian */
++
++/*
++ * packed YCbCr420 2x2 tiled formats
++ * first 64 bits will contain Y,Cb,Cr components for a 2x2 tile
++ */
++/* [63:0]   A3:A2:Y3:0:Cr0:0:Y2:0:A1:A0:Y1:0:Cb0:0:Y0:0  1:1:8:2:8:2:8:2:1:1:8:2:8:2:8:2 little endian */
++#define DRM_FORMAT_Y0L0		fourcc_code('Y', '0', 'L', '0')
++/* [63:0]   X3:X2:Y3:0:Cr0:0:Y2:0:X1:X0:Y1:0:Cb0:0:Y0:0  1:1:8:2:8:2:8:2:1:1:8:2:8:2:8:2 little endian */
++#define DRM_FORMAT_X0L0		fourcc_code('X', '0', 'L', '0')
++
++/* [63:0]   A3:A2:Y3:Cr0:Y2:A1:A0:Y1:Cb0:Y0  1:1:10:10:10:1:1:10:10:10 little endian */
++#define DRM_FORMAT_Y0L2		fourcc_code('Y', '0', 'L', '2')
++/* [63:0]   X3:X2:Y3:Cr0:Y2:X1:X0:Y1:Cb0:Y0  1:1:10:10:10:1:1:10:10:10 little endian */
++#define DRM_FORMAT_X0L2		fourcc_code('X', '0', 'L', '2')
++
++/*
++ * 1-plane YUV 4:2:0
++ * In these formats, the component ordering is specified (Y, followed by U
++ * then V), but the exact Linear layout is undefined.
++ * These formats can only be used with a non-Linear modifier.
++ */
++#define DRM_FORMAT_YUV420_8BIT	fourcc_code('Y', 'U', '0', '8')
++#define DRM_FORMAT_YUV420_10BIT	fourcc_code('Y', 'U', '1', '0')
++
++/*
++ * 2 plane RGB + A
++ * index 0 = RGB plane, same format as the corresponding non _A8 format has
++ * index 1 = A plane, [7:0] A
++ */
++#define DRM_FORMAT_XRGB8888_A8	fourcc_code('X', 'R', 'A', '8')
++#define DRM_FORMAT_XBGR8888_A8	fourcc_code('X', 'B', 'A', '8')
++#define DRM_FORMAT_RGBX8888_A8	fourcc_code('R', 'X', 'A', '8')
++#define DRM_FORMAT_BGRX8888_A8	fourcc_code('B', 'X', 'A', '8')
++#define DRM_FORMAT_RGB888_A8	fourcc_code('R', '8', 'A', '8')
++#define DRM_FORMAT_BGR888_A8	fourcc_code('B', '8', 'A', '8')
++#define DRM_FORMAT_RGB565_A8	fourcc_code('R', '5', 'A', '8')
++#define DRM_FORMAT_BGR565_A8	fourcc_code('B', '5', 'A', '8')
++
++/*
++ * 2 plane YCbCr
++ * index 0 = Y plane, [7:0] Y
++ * index 1 = Cr:Cb plane, [15:0] Cr:Cb little endian
++ * or
++ * index 1 = Cb:Cr plane, [15:0] Cb:Cr little endian
++ */
++#define DRM_FORMAT_NV12		fourcc_code('N', 'V', '1', '2') /* 2x2 subsampled Cr:Cb plane */
++#define DRM_FORMAT_NV21		fourcc_code('N', 'V', '2', '1') /* 2x2 subsampled Cb:Cr plane */
++#define DRM_FORMAT_NV16		fourcc_code('N', 'V', '1', '6') /* 2x1 subsampled Cr:Cb plane */
++#define DRM_FORMAT_NV61		fourcc_code('N', 'V', '6', '1') /* 2x1 subsampled Cb:Cr plane */
++#define DRM_FORMAT_NV24		fourcc_code('N', 'V', '2', '4') /* non-subsampled Cr:Cb plane */
++#define DRM_FORMAT_NV42		fourcc_code('N', 'V', '4', '2') /* non-subsampled Cb:Cr plane */
++#define DRM_FORMAT_NV12_10		fourcc_code('N', 'A', '1', '2')
++
++/*
++ * 2 plane YCbCr
++ * index 0 = Y plane, [39:0] Y3:Y2:Y1:Y0 little endian
++ * index 1 = Cr:Cb plane, [39:0] Cr1:Cb1:Cr0:Cb0 little endian
++ */
++#define DRM_FORMAT_NV15         fourcc_code('N', 'V', '1', '5') /* 2x2 subsampled Cr:Cb plane */
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y:x [10:6] little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [10:6:10:6] little endian
++ */
++#define DRM_FORMAT_P210		fourcc_code('P', '2', '1', '0') /* 2x1 subsampled Cr:Cb plane, 10 bit per channel */
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y:x [10:6] little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [10:6:10:6] little endian
++ */
++#define DRM_FORMAT_P010		fourcc_code('P', '0', '1', '0') /* 2x2 subsampled Cr:Cb plane 10 bits per channel */
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y:x [12:4] little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [12:4:12:4] little endian
++ */
++#define DRM_FORMAT_P012		fourcc_code('P', '0', '1', '2') /* 2x2 subsampled Cr:Cb plane 12 bits per channel */
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:Cb [16:16] little endian
++ */
++#define DRM_FORMAT_P016		fourcc_code('P', '0', '1', '6') /* 2x2 subsampled Cr:Cb plane 16 bits per channel */
++
++/*
++ * 3 plane YCbCr
++ * index 0: Y plane, [7:0] Y
++ * index 1: Cb plane, [7:0] Cb
++ * index 2: Cr plane, [7:0] Cr
++ * or
++ * index 1: Cr plane, [7:0] Cr
++ * index 2: Cb plane, [7:0] Cb
++ */
++#define DRM_FORMAT_YUV410	fourcc_code('Y', 'U', 'V', '9') /* 4x4 subsampled Cb (1) and Cr (2) planes */
++#define DRM_FORMAT_YVU410	fourcc_code('Y', 'V', 'U', '9') /* 4x4 subsampled Cr (1) and Cb (2) planes */
++#define DRM_FORMAT_YUV411	fourcc_code('Y', 'U', '1', '1') /* 4x1 subsampled Cb (1) and Cr (2) planes */
++#define DRM_FORMAT_YVU411	fourcc_code('Y', 'V', '1', '1') /* 4x1 subsampled Cr (1) and Cb (2) planes */
++#define DRM_FORMAT_YUV420	fourcc_code('Y', 'U', '1', '2') /* 2x2 subsampled Cb (1) and Cr (2) planes */
++#define DRM_FORMAT_YVU420	fourcc_code('Y', 'V', '1', '2') /* 2x2 subsampled Cr (1) and Cb (2) planes */
++#define DRM_FORMAT_YUV422	fourcc_code('Y', 'U', '1', '6') /* 2x1 subsampled Cb (1) and Cr (2) planes */
++#define DRM_FORMAT_YVU422	fourcc_code('Y', 'V', '1', '6') /* 2x1 subsampled Cr (1) and Cb (2) planes */
++#define DRM_FORMAT_YUV444	fourcc_code('Y', 'U', '2', '4') /* non-subsampled Cb (1) and Cr (2) planes */
++#define DRM_FORMAT_YVU444	fourcc_code('Y', 'V', '2', '4') /* non-subsampled Cr (1) and Cb (2) planes */
++
++
++/*
++ * Format Modifiers:
++ *
++ * Format modifiers describe, typically, a re-ordering or modification
++ * of the data in a plane of an FB.  This can be used to express tiled/
++ * swizzled formats, or compression, or a combination of the two.
++ *
++ * The upper 8 bits of the format modifier are a vendor-id as assigned
++ * below.  The lower 56 bits are assigned as vendor sees fit.
++ */
++
++/* Vendor Ids: */
++#define DRM_FORMAT_MOD_NONE           0
++#define DRM_FORMAT_MOD_VENDOR_NONE    0
++#define DRM_FORMAT_MOD_VENDOR_INTEL   0x01
++#define DRM_FORMAT_MOD_VENDOR_AMD     0x02
++#define DRM_FORMAT_MOD_VENDOR_NVIDIA  0x03
++#define DRM_FORMAT_MOD_VENDOR_SAMSUNG 0x04
++#define DRM_FORMAT_MOD_VENDOR_QCOM    0x05
++#define DRM_FORMAT_MOD_VENDOR_VIVANTE 0x06
++#define DRM_FORMAT_MOD_VENDOR_BROADCOM 0x07
++#define DRM_FORMAT_MOD_VENDOR_ARM     0x08
++#define DRM_FORMAT_MOD_VENDOR_ALLWINNER 0x09
++
++/* add more to the end as needed */
++
++#define DRM_FORMAT_RESERVED	      ((1ULL << 56) - 1)
++
++#define fourcc_mod_code(vendor, val) \
++	((((__u64)DRM_FORMAT_MOD_VENDOR_## vendor) << 56) | ((val) & 0x00ffffffffffffffULL))
++
++/*
++ * Format Modifier tokens:
++ *
++ * When adding a new token please document the layout with a code comment,
++ * similar to the fourcc codes above. drm_fourcc.h is considered the
++ * authoritative source for all of these.
++ */
++
++/*
++ * Invalid Modifier
++ *
++ * This modifier can be used as a sentinel to terminate the format modifiers
++ * list, or to initialize a variable with an invalid modifier. It might also be
++ * used to report an error back to userspace for certain APIs.
++ */
++#define DRM_FORMAT_MOD_INVALID	fourcc_mod_code(NONE, DRM_FORMAT_RESERVED)
++
++/*
++ * Linear Layout
++ *
++ * Just plain linear layout. Note that this is different from no specifying any
++ * modifier (e.g. not setting DRM_MODE_FB_MODIFIERS in the DRM_ADDFB2 ioctl),
++ * which tells the driver to also take driver-internal information into account
++ * and so might actually result in a tiled framebuffer.
++ */
++#define DRM_FORMAT_MOD_LINEAR	fourcc_mod_code(NONE, 0)
++
++/* Intel framebuffer modifiers */
++
++/*
++ * Intel X-tiling layout
++ *
++ * This is a tiled layout using 4Kb tiles (except on gen2 where the tiles 2Kb)
++ * in row-major layout. Within the tile bytes are laid out row-major, with
++ * a platform-dependent stride. On top of that the memory can apply
++ * platform-depending swizzling of some higher address bits into bit6.
++ *
++ * This format is highly platforms specific and not useful for cross-driver
++ * sharing. It exists since on a given platform it does uniquely identify the
++ * layout in a simple way for i915-specific userspace.
++ */
++#define I915_FORMAT_MOD_X_TILED	fourcc_mod_code(INTEL, 1)
++
++/*
++ * Intel Y-tiling layout
++ *
++ * This is a tiled layout using 4Kb tiles (except on gen2 where the tiles 2Kb)
++ * in row-major layout. Within the tile bytes are laid out in OWORD (16 bytes)
++ * chunks column-major, with a platform-dependent height. On top of that the
++ * memory can apply platform-depending swizzling of some higher address bits
++ * into bit6.
++ *
++ * This format is highly platforms specific and not useful for cross-driver
++ * sharing. It exists since on a given platform it does uniquely identify the
++ * layout in a simple way for i915-specific userspace.
++ */
++#define I915_FORMAT_MOD_Y_TILED	fourcc_mod_code(INTEL, 2)
++
++/*
++ * Intel Yf-tiling layout
++ *
++ * This is a tiled layout using 4Kb tiles in row-major layout.
++ * Within the tile pixels are laid out in 16 256 byte units / sub-tiles which
++ * are arranged in four groups (two wide, two high) with column-major layout.
++ * Each group therefore consists out of four 256 byte units, which are also laid
++ * out as 2x2 column-major.
++ * 256 byte units are made out of four 64 byte blocks of pixels, producing
++ * either a square block or a 2:1 unit.
++ * 64 byte blocks of pixels contain four pixel rows of 16 bytes, where the width
++ * in pixel depends on the pixel depth.
++ */
++#define I915_FORMAT_MOD_Yf_TILED fourcc_mod_code(INTEL, 3)
++
++/*
++ * Intel color control surface (CCS) for render compression
++ *
++ * The framebuffer format must be one of the 8:8:8:8 RGB formats.
++ * The main surface will be plane index 0 and must be Y/Yf-tiled,
++ * the CCS will be plane index 1.
++ *
++ * Each CCS tile matches a 1024x512 pixel area of the main surface.
++ * To match certain aspects of the 3D hardware the CCS is
++ * considered to be made up of normal 128Bx32 Y tiles, Thus
++ * the CCS pitch must be specified in multiples of 128 bytes.
++ *
++ * In reality the CCS tile appears to be a 64Bx64 Y tile, composed
++ * of QWORD (8 bytes) chunks instead of OWORD (16 bytes) chunks.
++ * But that fact is not relevant unless the memory is accessed
++ * directly.
++ */
++#define I915_FORMAT_MOD_Y_TILED_CCS	fourcc_mod_code(INTEL, 4)
++#define I915_FORMAT_MOD_Yf_TILED_CCS	fourcc_mod_code(INTEL, 5)
++
++/*
++ * Tiled, NV12MT, grouped in 64 (pixels) x 32 (lines) -sized macroblocks
++ *
++ * Macroblocks are laid in a Z-shape, and each pixel data is following the
++ * standard NV12 style.
++ * As for NV12, an image is the result of two frame buffers: one for Y,
++ * one for the interleaved Cb/Cr components (1/2 the height of the Y buffer).
++ * Alignment requirements are (for each buffer):
++ * - multiple of 128 pixels for the width
++ * - multiple of  32 pixels for the height
++ *
++ * For more information: see https://linuxtv.org/downloads/v4l-dvb-apis/re32.html
++ */
++#define DRM_FORMAT_MOD_SAMSUNG_64_32_TILE	fourcc_mod_code(SAMSUNG, 1)
++
++/*
++ * Tiled, 16 (pixels) x 16 (lines) - sized macroblocks
++ *
++ * This is a simple tiled layout using tiles of 16x16 pixels in a row-major
++ * layout. For YCbCr formats Cb/Cr components are taken in such a way that
++ * they correspond to their 16x16 luma block.
++ */
++#define DRM_FORMAT_MOD_SAMSUNG_16_16_TILE	fourcc_mod_code(SAMSUNG, 2)
++
++/*
++ * Qualcomm Compressed Format
++ *
++ * Refers to a compressed variant of the base format that is compressed.
++ * Implementation may be platform and base-format specific.
++ *
++ * Each macrotile consists of m x n (mostly 4 x 4) tiles.
++ * Pixel data pitch/stride is aligned with macrotile width.
++ * Pixel data height is aligned with macrotile height.
++ * Entire pixel data buffer is aligned with 4k(bytes).
++ */
++#define DRM_FORMAT_MOD_QCOM_COMPRESSED	fourcc_mod_code(QCOM, 1)
++
++/* Vivante framebuffer modifiers */
++
++/*
++ * Vivante 4x4 tiling layout
++ *
++ * This is a simple tiled layout using tiles of 4x4 pixels in a row-major
++ * layout.
++ */
++#define DRM_FORMAT_MOD_VIVANTE_TILED		fourcc_mod_code(VIVANTE, 1)
++
++/*
++ * Vivante 64x64 super-tiling layout
++ *
++ * This is a tiled layout using 64x64 pixel super-tiles, where each super-tile
++ * contains 8x4 groups of 2x4 tiles of 4x4 pixels (like above) each, all in row-
++ * major layout.
++ *
++ * For more information: see
++ * https://github.com/etnaviv/etna_viv/blob/master/doc/hardware.md#texture-tiling
++ */
++#define DRM_FORMAT_MOD_VIVANTE_SUPER_TILED	fourcc_mod_code(VIVANTE, 2)
++
++/*
++ * Vivante 4x4 tiling layout for dual-pipe
++ *
++ * Same as the 4x4 tiling layout, except every second 4x4 pixel tile starts at a
++ * different base address. Offsets from the base addresses are therefore halved
++ * compared to the non-split tiled layout.
++ */
++#define DRM_FORMAT_MOD_VIVANTE_SPLIT_TILED	fourcc_mod_code(VIVANTE, 3)
++
++/*
++ * Vivante 64x64 super-tiling layout for dual-pipe
++ *
++ * Same as the 64x64 super-tiling layout, except every second 4x4 pixel tile
++ * starts at a different base address. Offsets from the base addresses are
++ * therefore halved compared to the non-split super-tiled layout.
++ */
++#define DRM_FORMAT_MOD_VIVANTE_SPLIT_SUPER_TILED fourcc_mod_code(VIVANTE, 4)
++
++/* NVIDIA frame buffer modifiers */
++
++/*
++ * Tegra Tiled Layout, used by Tegra 2, 3 and 4.
++ *
++ * Pixels are arranged in simple tiles of 16 x 16 bytes.
++ */
++#define DRM_FORMAT_MOD_NVIDIA_TEGRA_TILED fourcc_mod_code(NVIDIA, 1)
++
++/*
++ * 16Bx2 Block Linear layout, used by desktop GPUs, and Tegra K1 and later
++ *
++ * Pixels are arranged in 64x8 Groups Of Bytes (GOBs). GOBs are then stacked
++ * vertically by a power of 2 (1 to 32 GOBs) to form a block.
++ *
++ * Within a GOB, data is ordered as 16B x 2 lines sectors laid in Z-shape.
++ *
++ * Parameter 'v' is the log2 encoding of the number of GOBs stacked vertically.
++ * Valid values are:
++ *
++ * 0 == ONE_GOB
++ * 1 == TWO_GOBS
++ * 2 == FOUR_GOBS
++ * 3 == EIGHT_GOBS
++ * 4 == SIXTEEN_GOBS
++ * 5 == THIRTYTWO_GOBS
++ *
++ * Chapter 20 "Pixel Memory Formats" of the Tegra X1 TRM describes this format
++ * in full detail.
++ */
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(v) \
++	fourcc_mod_code(NVIDIA, 0x10 | ((v) & 0xf))
++
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_ONE_GOB \
++	fourcc_mod_code(NVIDIA, 0x10)
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_TWO_GOB \
++	fourcc_mod_code(NVIDIA, 0x11)
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_FOUR_GOB \
++	fourcc_mod_code(NVIDIA, 0x12)
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_EIGHT_GOB \
++	fourcc_mod_code(NVIDIA, 0x13)
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_SIXTEEN_GOB \
++	fourcc_mod_code(NVIDIA, 0x14)
++#define DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK_THIRTYTWO_GOB \
++	fourcc_mod_code(NVIDIA, 0x15)
++
++/*
++ * Some Broadcom modifiers take parameters, for example the number of
++ * vertical lines in the image. Reserve the lower 32 bits for modifier
++ * type, and the next 24 bits for parameters. Top 8 bits are the
++ * vendor code.
++ */
++#define __fourcc_mod_broadcom_param_shift 8
++#define __fourcc_mod_broadcom_param_bits 48
++#define fourcc_mod_broadcom_code(val, params) \
++	fourcc_mod_code(BROADCOM, ((((__u64)params) << __fourcc_mod_broadcom_param_shift) | val))
++#define fourcc_mod_broadcom_param(m) \
++	((int)(((m) >> __fourcc_mod_broadcom_param_shift) &	\
++	       ((1ULL << __fourcc_mod_broadcom_param_bits) - 1)))
++#define fourcc_mod_broadcom_mod(m) \
++	((m) & ~(((1ULL << __fourcc_mod_broadcom_param_bits) - 1) <<	\
++		 __fourcc_mod_broadcom_param_shift))
++
++/*
++ * Broadcom VC4 "T" format
++ *
++ * This is the primary layout that the V3D GPU can texture from (it
++ * can't do linear).  The T format has:
++ *
++ * - 64b utiles of pixels in a raster-order grid according to cpp.  It's 4x4
++ *   pixels at 32 bit depth.
++ *
++ * - 1k subtiles made of a 4x4 raster-order grid of 64b utiles (so usually
++ *   16x16 pixels).
++ *
++ * - 4k tiles made of a 2x2 grid of 1k subtiles (so usually 32x32 pixels).  On
++ *   even 4k tile rows, they're arranged as (BL, TL, TR, BR), and on odd rows
++ *   they're (TR, BR, BL, TL), where bottom left is start of memory.
++ *
++ * - an image made of 4k tiles in rows either left-to-right (even rows of 4k
++ *   tiles) or right-to-left (odd rows of 4k tiles).
++ */
++#define DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED fourcc_mod_code(BROADCOM, 1)
++
++/*
++ * Broadcom SAND format
++ *
++ * This is the native format that the H.264 codec block uses.  For VC4
++ * HVS, it is only valid for H.264 (NV12/21) and RGBA modes.
++ *
++ * The image can be considered to be split into columns, and the
++ * columns are placed consecutively into memory.  The width of those
++ * columns can be either 32, 64, 128, or 256 pixels, but in practice
++ * only 128 pixel columns are used.
++ *
++ * The pitch between the start of each column is set to optimally
++ * switch between SDRAM banks. This is passed as the number of lines
++ * of column width in the modifier (we can't use the stride value due
++ * to various core checks that look at it , so you should set the
++ * stride to width*cpp).
++ *
++ * Note that the column height for this format modifier is the same
++ * for all of the planes, assuming that each column contains both Y
++ * and UV.  Some SAND-using hardware stores UV in a separate tiled
++ * image from Y to reduce the column height, which is not supported
++ * with these modifiers.
++ */
++
++#define DRM_FORMAT_MOD_BROADCOM_SAND32_COL_HEIGHT(v) \
++	fourcc_mod_broadcom_code(2, v)
++#define DRM_FORMAT_MOD_BROADCOM_SAND64_COL_HEIGHT(v) \
++	fourcc_mod_broadcom_code(3, v)
++#define DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(v) \
++	fourcc_mod_broadcom_code(4, v)
++#define DRM_FORMAT_MOD_BROADCOM_SAND256_COL_HEIGHT(v) \
++	fourcc_mod_broadcom_code(5, v)
++
++#define DRM_FORMAT_MOD_BROADCOM_SAND32 \
++	DRM_FORMAT_MOD_BROADCOM_SAND32_COL_HEIGHT(0)
++#define DRM_FORMAT_MOD_BROADCOM_SAND64 \
++	DRM_FORMAT_MOD_BROADCOM_SAND64_COL_HEIGHT(0)
++#define DRM_FORMAT_MOD_BROADCOM_SAND128 \
++	DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(0)
++#define DRM_FORMAT_MOD_BROADCOM_SAND256 \
++	DRM_FORMAT_MOD_BROADCOM_SAND256_COL_HEIGHT(0)
++
++/* Broadcom UIF format
++ *
++ * This is the common format for the current Broadcom multimedia
++ * blocks, including V3D 3.x and newer, newer video codecs, and
++ * displays.
++ *
++ * The image consists of utiles (64b blocks), UIF blocks (2x2 utiles),
++ * and macroblocks (4x4 UIF blocks).  Those 4x4 UIF block groups are
++ * stored in columns, with padding between the columns to ensure that
++ * moving from one column to the next doesn't hit the same SDRAM page
++ * bank.
++ *
++ * To calculate the padding, it is assumed that each hardware block
++ * and the software driving it knows the platform's SDRAM page size,
++ * number of banks, and XOR address, and that it's identical between
++ * all blocks using the format.  This tiling modifier will use XOR as
++ * necessary to reduce the padding.  If a hardware block can't do XOR,
++ * the assumption is that a no-XOR tiling modifier will be created.
++ */
++#define DRM_FORMAT_MOD_BROADCOM_UIF fourcc_mod_code(BROADCOM, 6)
++
++/*
++ * Arm Framebuffer Compression (AFBC) modifiers
++ *
++ * AFBC is a proprietary lossless image compression protocol and format.
++ * It provides fine-grained random access and minimizes the amount of data
++ * transferred between IP blocks.
++ *
++ * AFBC has several features which may be supported and/or used, which are
++ * represented using bits in the modifier. Not all combinations are valid,
++ * and different devices or use-cases may support different combinations.
++ *
++ * Further information on the use of AFBC modifiers can be found in
++ * Documentation/gpu/afbc.rst
++ */
++//#define DRM_FORMAT_MOD_ARM_AFBC(__afbc_mode)	fourcc_mod_code(ARM, __afbc_mode)
++
++/*
++ * The top 4 bits (out of the 56 bits alloted for specifying vendor specific
++ * modifiers) denote the category for modifiers. Currently we have three
++ * categories of modifiers ie AFBC, MISC and AFRC. We can have a maximum of
++ * sixteen different categories.
++ */
++#define DRM_FORMAT_MOD_ARM_CODE(__type, __val) \
++	fourcc_mod_code(ARM, ((__u64)(__type) << 52) | ((__val) & 0x000fffffffffffffULL))
++
++#define DRM_FORMAT_MOD_ARM_TYPE_AFBC 0x00
++#define DRM_FORMAT_MOD_ARM_TYPE_MISC 0x01
++
++#define DRM_FORMAT_MOD_ARM_AFBC(__afbc_mode) \
++	DRM_FORMAT_MOD_ARM_CODE(DRM_FORMAT_MOD_ARM_TYPE_AFBC, __afbc_mode)
++
++/*
++ * AFBC superblock size
++ *
++ * Indicates the superblock size(s) used for the AFBC buffer. The buffer
++ * size (in pixels) must be aligned to a multiple of the superblock size.
++ * Four lowest significant bits(LSBs) are reserved for block size.
++ *
++ * Where one superblock size is specified, it applies to all planes of the
++ * buffer (e.g. 16x16, 32x8). When multiple superblock sizes are specified,
++ * the first applies to the Luma plane and the second applies to the Chroma
++ * plane(s). e.g. (32x8_64x4 means 32x8 Luma, with 64x4 Chroma).
++ * Multiple superblock sizes are only valid for multi-plane YCbCr formats.
++ */
++#define AFBC_FORMAT_MOD_BLOCK_SIZE_MASK      0xf
++#define AFBC_FORMAT_MOD_BLOCK_SIZE_16x16     (1ULL)
++#define AFBC_FORMAT_MOD_BLOCK_SIZE_32x8      (2ULL)
++#define AFBC_FORMAT_MOD_BLOCK_SIZE_64x4      (3ULL)
++#define AFBC_FORMAT_MOD_BLOCK_SIZE_32x8_64x4 (4ULL)
++
++/*
++ * AFBC lossless colorspace transform
++ *
++ * Indicates that the buffer makes use of the AFBC lossless colorspace
++ * transform.
++ */
++#define AFBC_FORMAT_MOD_YTR     (1ULL <<  4)
++
++/*
++ * AFBC block-split
++ *
++ * Indicates that the payload of each superblock is split. The second
++ * half of the payload is positioned at a predefined offset from the start
++ * of the superblock payload.
++ */
++#define AFBC_FORMAT_MOD_SPLIT   (1ULL <<  5)
++
++/*
++ * AFBC sparse layout
++ *
++ * This flag indicates that the payload of each superblock must be stored at a
++ * predefined position relative to the other superblocks in the same AFBC
++ * buffer. This order is the same order used by the header buffer. In this mode
++ * each superblock is given the same amount of space as an uncompressed
++ * superblock of the particular format would require, rounding up to the next
++ * multiple of 128 bytes in size.
++ */
++#define AFBC_FORMAT_MOD_SPARSE  (1ULL <<  6)
++
++/*
++ * AFBC copy-block restrict
++ *
++ * Buffers with this flag must obey the copy-block restriction. The restriction
++ * is such that there are no copy-blocks referring across the border of 8x8
++ * blocks. For the subsampled data the 8x8 limitation is also subsampled.
++ */
++#define AFBC_FORMAT_MOD_CBR     (1ULL <<  7)
++
++/*
++ * AFBC tiled layout
++ *
++ * The tiled layout groups superblocks in 8x8 or 4x4 tiles, where all
++ * superblocks inside a tile are stored together in memory. 8x8 tiles are used
++ * for pixel formats up to and including 32 bpp while 4x4 tiles are used for
++ * larger bpp formats. The order between the tiles is scan line.
++ * When the tiled layout is used, the buffer size (in pixels) must be aligned
++ * to the tile size.
++ */
++#define AFBC_FORMAT_MOD_TILED   (1ULL <<  8)
++
++/*
++ * AFBC solid color blocks
++ *
++ * Indicates that the buffer makes use of solid-color blocks, whereby bandwidth
++ * can be reduced if a whole superblock is a single color.
++ */
++#define AFBC_FORMAT_MOD_SC      (1ULL <<  9)
++
++/*
++ * AFBC double-buffer
++ *
++ * Indicates that the buffer is allocated in a layout safe for front-buffer
++ * rendering.
++ */
++#define AFBC_FORMAT_MOD_DB      (1ULL << 10)
++
++/*
++ * AFBC buffer content hints
++ *
++ * Indicates that the buffer includes per-superblock content hints.
++ */
++#define AFBC_FORMAT_MOD_BCH     (1ULL << 11)
++
++/*
++ * Allwinner tiled modifier
++ *
++ * This tiling mode is implemented by the VPU found on all Allwinner platforms,
++ * codenamed sunxi. It is associated with a YUV format that uses either 2 or 3
++ * planes.
++ *
++ * With this tiling, the luminance samples are disposed in tiles representing
++ * 32x32 pixels and the chrominance samples in tiles representing 32x64 pixels.
++ * The pixel order in each tile is linear and the tiles are disposed linearly,
++ * both in row-major order.
++ */
++#define DRM_FORMAT_MOD_ALLWINNER_TILED fourcc_mod_code(ALLWINNER, 1)
++
++#if defined(__cplusplus)
++}
++#endif
++
++#endif /* DRM_FOURCC_H */
+diff --git a/component/osal/include/sculptor/linux/drm_mode.h b/component/osal/include/sculptor/linux/drm_mode.h
+new file mode 100644
+index 0000000..83f6830
+--- /dev/null
++++ b/component/osal/include/sculptor/linux/drm_mode.h
+@@ -0,0 +1,571 @@
++/*
++ * Copyright (c) 2007 Dave Airlie <airlied@linux.ie>
++ * Copyright (c) 2007 Jakob Bornecrantz <wallbraker@gmail.com>
++ * Copyright (c) 2008 Red Hat Inc.
++ * Copyright (c) 2007-2008 Tungsten Graphics, Inc., Cedar Park, TX., USA
++ * Copyright (c) 2007-2008 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef SRC_RT_BASE_INCLUDE_DRM_MODE_H_
++#define SRC_RT_BASE_INCLUDE_DRM_MODE_H_
++
++#define DRM_DISPLAY_INFO_LEN    32
++#define DRM_CONNECTOR_NAME_LEN  32
++#define DRM_DISPLAY_MODE_LEN    32
++#define DRM_PROP_NAME_LEN   32
++
++#define DRM_MODE_TYPE_BUILTIN   (1<<0)
++#define DRM_MODE_TYPE_CLOCK_C   ((1<<1) | DRM_MODE_TYPE_BUILTIN)
++#define DRM_MODE_TYPE_CRTC_C    ((1<<2) | DRM_MODE_TYPE_BUILTIN)
++#define DRM_MODE_TYPE_PREFERRED (1<<3)
++#define DRM_MODE_TYPE_DEFAULT   (1<<4)
++#define DRM_MODE_TYPE_USERDEF   (1<<5)
++#define DRM_MODE_TYPE_DRIVER    (1<<6)
++
++/* Video mode flags */
++/* bit compatible with the xorg definitions. */
++#define DRM_MODE_FLAG_PHSYNC            (1<<0)
++#define DRM_MODE_FLAG_NHSYNC            (1<<1)
++#define DRM_MODE_FLAG_PVSYNC            (1<<2)
++#define DRM_MODE_FLAG_NVSYNC            (1<<3)
++#define DRM_MODE_FLAG_INTERLACE         (1<<4)
++#define DRM_MODE_FLAG_DBLSCAN           (1<<5)
++#define DRM_MODE_FLAG_CSYNC         (1<<6)
++#define DRM_MODE_FLAG_PCSYNC            (1<<7)
++#define DRM_MODE_FLAG_NCSYNC            (1<<8)
++#define DRM_MODE_FLAG_HSKEW         (1<<9) /* hskew provided */
++#define DRM_MODE_FLAG_BCAST         (1<<10)
++#define DRM_MODE_FLAG_PIXMUX            (1<<11)
++#define DRM_MODE_FLAG_DBLCLK            (1<<12)
++#define DRM_MODE_FLAG_CLKDIV2           (1<<13)
++#define DRM_MODE_FLAG_3D_MASK           (0x1f << 14)
++#define  DRM_MODE_FLAG_3D_NONE          (0 << 14)
++#define  DRM_MODE_FLAG_3D_FRAME_PACKING     (1<<14)
++#define  DRM_MODE_FLAG_3D_FIELD_ALTERNATIVE (2<<14)
++#define  DRM_MODE_FLAG_3D_LINE_ALTERNATIVE  (3<<14)
++#define  DRM_MODE_FLAG_3D_SIDE_BY_SIDE_FULL (4<<14)
++#define  DRM_MODE_FLAG_3D_L_DEPTH       (5<<14)
++#define  DRM_MODE_FLAG_3D_L_DEPTH_GFX_GFX_DEPTH (6<<14)
++#define  DRM_MODE_FLAG_3D_TOP_AND_BOTTOM    (7<<14)
++#define  DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF (8<<14)
++
++
++/* DPMS flags */
++/* bit compatible with the xorg definitions. */
++#define DRM_MODE_DPMS_ON    0
++#define DRM_MODE_DPMS_STANDBY   1
++#define DRM_MODE_DPMS_SUSPEND   2
++#define DRM_MODE_DPMS_OFF   3
++
++/* Scaling mode options */
++#define DRM_MODE_SCALE_NONE         0 /* Unmodified timing (display or software can still scale) */
++#define DRM_MODE_SCALE_FULLSCREEN   1 /* Full screen, ignore aspect */
++#define DRM_MODE_SCALE_CENTER       2 /* Centered, no scaling */
++#define DRM_MODE_SCALE_ASPECT       3 /* Full screen, preserve aspect */
++
++/* Dithering mode options */
++#define DRM_MODE_DITHERING_OFF  0
++#define DRM_MODE_DITHERING_ON   1
++#define DRM_MODE_DITHERING_AUTO 2
++
++/* Dirty info options */
++#define DRM_MODE_DIRTY_OFF      0
++#define DRM_MODE_DIRTY_ON       1
++#define DRM_MODE_DIRTY_ANNOTATE 2
++
++/* rotation property bits */
++#define DRM_ROTATE_0    0
++#define DRM_ROTATE_90   1
++#define DRM_ROTATE_180  2
++#define DRM_ROTATE_270  3
++#define DRM_REFLECT_X   4
++#define DRM_REFLECT_Y   5
++
++struct drm_mode_modeinfo {
++    __u32 clock;
++    __u16 hdisplay, hsync_start, hsync_end, htotal, hskew;
++    __u16 vdisplay, vsync_start, vsync_end, vtotal, vscan;
++
++    __u32 vrefresh;
++
++    __u32 flags;
++    __u32 type;
++    char name[DRM_DISPLAY_MODE_LEN];
++};
++
++struct drm_mode_card_res {
++    __u64 fb_id_ptr;
++    __u64 crtc_id_ptr;
++    __u64 connector_id_ptr;
++    __u64 encoder_id_ptr;
++    __u32 count_fbs;
++    __u32 count_crtcs;
++    __u32 count_connectors;
++    __u32 count_encoders;
++    __u32 min_width, max_width;
++    __u32 min_height, max_height;
++};
++
++struct drm_mode_crtc {
++    __u64 set_connectors_ptr;
++    __u32 count_connectors;
++
++    __u32 crtc_id; /**< Id */
++    __u32 fb_id; /**< Id of framebuffer */
++
++    __u32 x, y; /**< Position on the frameuffer */
++
++    __u32 gamma_size;
++    __u32 mode_valid;
++    struct drm_mode_modeinfo mode;
++};
++
++#define DRM_MODE_PRESENT_TOP_FIELD     (1<<0)
++#define DRM_MODE_PRESENT_BOTTOM_FIELD  (1<<1)
++
++/* Planes blend with or override other bits on the CRTC */
++struct drm_mode_set_plane {
++    __u32 plane_id;
++    __u32 crtc_id;
++    __u32 fb_id; /* fb object contains surface format type */
++    __u32 flags;
++
++    /* Signed dest location allows it to be partially off screen */
++    __s32 crtc_x, crtc_y;
++    __u32 crtc_w, crtc_h;
++
++    /* Source values are 16.16 fixed point */
++    __u32 src_x, src_y;
++    __u32 src_h, src_w;
++};
++
++struct drm_mode_get_plane {
++    __u32 plane_id;
++
++    __u32 crtc_id;
++    __u32 fb_id;
++
++    __u32 possible_crtcs;
++    __u32 gamma_size;
++
++    __u32 count_format_types;
++    __u64 format_type_ptr;
++};
++
++struct drm_mode_get_plane_res {
++    __u64 plane_id_ptr;
++    __u32 count_planes;
++};
++
++#define DRM_MODE_ENCODER_NONE   0
++#define DRM_MODE_ENCODER_DAC    1
++#define DRM_MODE_ENCODER_TMDS   2
++#define DRM_MODE_ENCODER_LVDS   3
++#define DRM_MODE_ENCODER_TVDAC  4
++#define DRM_MODE_ENCODER_VIRTUAL 5
++#define DRM_MODE_ENCODER_DSI    6
++#define DRM_MODE_ENCODER_DPMST  7
++
++struct drm_mode_get_encoder {
++    __u32 encoder_id;
++    __u32 encoder_type;
++
++    __u32 crtc_id; /**< Id of crtc */
++
++    __u32 possible_crtcs;
++    __u32 possible_clones;
++};
++
++/* This is for connectors with multiple signal types. */
++/* Try to match DRM_MODE_CONNECTOR_X as closely as possible. */
++#define DRM_MODE_SUBCONNECTOR_Automatic 0
++#define DRM_MODE_SUBCONNECTOR_Unknown   0
++#define DRM_MODE_SUBCONNECTOR_DVID  3
++#define DRM_MODE_SUBCONNECTOR_DVIA  4
++#define DRM_MODE_SUBCONNECTOR_Composite 5
++#define DRM_MODE_SUBCONNECTOR_SVIDEO    6
++#define DRM_MODE_SUBCONNECTOR_Component 8
++#define DRM_MODE_SUBCONNECTOR_SCART 9
++
++#define DRM_MODE_CONNECTOR_Unknown  0
++#define DRM_MODE_CONNECTOR_VGA      1
++#define DRM_MODE_CONNECTOR_DVII     2
++#define DRM_MODE_CONNECTOR_DVID     3
++#define DRM_MODE_CONNECTOR_DVIA     4
++#define DRM_MODE_CONNECTOR_Composite    5
++#define DRM_MODE_CONNECTOR_SVIDEO   6
++#define DRM_MODE_CONNECTOR_LVDS     7
++#define DRM_MODE_CONNECTOR_Component    8
++#define DRM_MODE_CONNECTOR_9PinDIN  9
++#define DRM_MODE_CONNECTOR_DisplayPort  10
++#define DRM_MODE_CONNECTOR_HDMIA    11
++#define DRM_MODE_CONNECTOR_HDMIB    12
++#define DRM_MODE_CONNECTOR_TV       13
++#define DRM_MODE_CONNECTOR_eDP      14
++#define DRM_MODE_CONNECTOR_VIRTUAL      15
++#define DRM_MODE_CONNECTOR_DSI      16
++
++struct drm_mode_get_connector {
++    __u64 encoders_ptr;
++    __u64 modes_ptr;
++    __u64 props_ptr;
++    __u64 prop_values_ptr;
++
++    __u32 count_modes;
++    __u32 count_props;
++    __u32 count_encoders;
++
++    __u32 encoder_id; /**< Current Encoder */
++    __u32 connector_id; /**< Id */
++    __u32 connector_type;
++    __u32 connector_type_id;
++
++    __u32 connection;
++    __u32 mm_width, mm_height; /**< HxW in millimeters */
++    __u32 subpixel;
++};
++
++#define DRM_MODE_PROP_PENDING   (1<<0)
++#define DRM_MODE_PROP_RANGE (1<<1)
++#define DRM_MODE_PROP_IMMUTABLE (1<<2)
++#define DRM_MODE_PROP_ENUM  (1<<3) /* enumerated type with text strings */
++#define DRM_MODE_PROP_BLOB  (1<<4)
++#define DRM_MODE_PROP_BITMASK   (1<<5) /* bitmask of enumerated types */
++
++/* non-extended types: legacy bitmask, one bit per type: */
++#define DRM_MODE_PROP_LEGACY_TYPE  ( \
++        DRM_MODE_PROP_RANGE | \
++        DRM_MODE_PROP_ENUM | \
++        DRM_MODE_PROP_BLOB | \
++        DRM_MODE_PROP_BITMASK)
++
++/* extended-types: rather than continue to consume a bit per type,
++ * grab a chunk of the bits to use as integer type id.
++ */
++#define DRM_MODE_PROP_EXTENDED_TYPE 0x0000ffc0
++#define DRM_MODE_PROP_TYPE(n)       ((n) << 6)
++#define DRM_MODE_PROP_OBJECT        DRM_MODE_PROP_TYPE(1)
++#define DRM_MODE_PROP_SIGNED_RANGE  DRM_MODE_PROP_TYPE(2)
++
++/* the PROP_ATOMIC flag is used to hide properties from userspace that
++ * is not aware of atomic properties.  This is mostly to work around
++ * older userspace (DDX drivers) that read/write each prop they find,
++ * witout being aware that this could be triggering a lengthy modeset.
++ */
++#define DRM_MODE_PROP_ATOMIC        0x80000000
++
++struct drm_mode_property_enum {
++    __u64 value;
++    char name[DRM_PROP_NAME_LEN];
++};
++
++struct drm_mode_get_property {
++    __u64 values_ptr; /* values and blob lengths */
++    __u64 enum_blob_ptr; /* enum and blob id ptrs */
++
++    __u32 prop_id;
++    __u32 flags;
++    char name[DRM_PROP_NAME_LEN];
++
++    __u32 count_values;
++    __u32 count_enum_blobs;
++};
++
++struct drm_mode_connector_set_property {
++    __u64 value;
++    __u32 prop_id;
++    __u32 connector_id;
++};
++
++#define DRM_MODE_OBJECT_CRTC 0xcccccccc
++#define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
++#define DRM_MODE_OBJECT_ENCODER 0xe0e0e0e0
++#define DRM_MODE_OBJECT_MODE 0xdededede
++#define DRM_MODE_OBJECT_PROPERTY 0xb0b0b0b0
++#define DRM_MODE_OBJECT_FB 0xfbfbfbfb
++#define DRM_MODE_OBJECT_BLOB 0xbbbbbbbb
++#define DRM_MODE_OBJECT_PLANE 0xeeeeeeee
++
++struct drm_mode_obj_get_properties {
++    __u64 props_ptr;
++    __u64 prop_values_ptr;
++    __u32 count_props;
++    __u32 obj_id;
++    __u32 obj_type;
++};
++
++struct drm_mode_obj_set_property {
++    __u64 value;
++    __u32 prop_id;
++    __u32 obj_id;
++    __u32 obj_type;
++};
++
++struct drm_mode_get_blob {
++    __u32 blob_id;
++    __u32 length;
++    __u64 data;
++};
++
++struct drm_mode_fb_cmd {
++    __u32 fb_id;
++    __u32 width, height;
++    __u32 pitch;
++    __u32 bpp;
++    __u32 depth;
++    /* driver specific handle */
++    __u32 handle;
++};
++
++#define DRM_MODE_FB_INTERLACED (1<<0) /* for interlaced framebuffers */
++
++struct drm_mode_fb_cmd2 {
++    __u32 fb_id;
++    __u32 width, height;
++    __u32 pixel_format; /* fourcc code from drm_fourcc.h */
++    __u32 flags;
++
++    /*
++     * In case of planar formats, this ioctl allows up to 4
++     * buffer objects with offsets and pitches per plane.
++     * The pitch and offset order is dictated by the fourcc,
++     * e.g. NV12 (http://fourcc.org/yuv.php#NV12) is described as:
++     *
++     *   YUV 4:2:0 image with a plane of 8 bit Y samples
++     *   followed by an interleaved U/V plane containing
++     *   8 bit 2x2 subsampled colour difference samples.
++     *
++     * So it would consist of Y as offset[0] and UV as
++     * offset[1].  Note that offset[0] will generally
++     * be 0.
++     */
++    __u32 handles[4];
++    __u32 pitches[4]; /* pitch for each plane */
++    __u32 offsets[4]; /* offset of each plane */
++};
++
++#define DRM_MODE_FB_DIRTY_ANNOTATE_COPY 0x01
++#define DRM_MODE_FB_DIRTY_ANNOTATE_FILL 0x02
++#define DRM_MODE_FB_DIRTY_FLAGS         0x03
++
++/*
++ * Mark a region of a framebuffer as dirty.
++ *
++ * Some hardware does not automatically update display contents
++ * as a hardware or software draw to a framebuffer. This ioctl
++ * allows userspace to tell the kernel and the hardware what
++ * regions of the framebuffer have changed.
++ *
++ * The kernel or hardware is free to update more then just the
++ * region specified by the clip rects. The kernel or hardware
++ * may also delay and/or coalesce several calls to dirty into a
++ * single update.
++ *
++ * Userspace may annotate the updates, the annotates are a
++ * promise made by the caller that the change is either a copy
++ * of pixels or a fill of a single color in the region specified.
++ *
++ * If the DRM_MODE_FB_DIRTY_ANNOTATE_COPY flag is given then
++ * the number of updated regions are half of num_clips given,
++ * where the clip rects are paired in src and dst. The width and
++ * height of each one of the pairs must match.
++ *
++ * If the DRM_MODE_FB_DIRTY_ANNOTATE_FILL flag is given the caller
++ * promises that the region specified of the clip rects is filled
++ * completely with a single color as given in the color argument.
++ */
++
++struct drm_mode_fb_dirty_cmd {
++    __u32 fb_id;
++    __u32 flags;
++    __u32 color;
++    __u32 num_clips;
++    __u64 clips_ptr;
++};
++
++struct drm_mode_mode_cmd {
++    __u32 connector_id;
++    struct drm_mode_modeinfo mode;
++};
++
++#define DRM_MODE_CURSOR_BO  (1<<0)
++#define DRM_MODE_CURSOR_MOVE    (1<<1)
++
++/*
++ * depending on the value in flags diffrent members are used.
++ *
++ * CURSOR_BO uses
++ *    crtc
++ *    width
++ *    height
++ *    handle - if 0 turns the cursor of
++ *
++ * CURSOR_MOVE uses
++ *    crtc
++ *    x
++ *    y
++ */
++struct drm_mode_cursor {
++    __u32 flags;
++    __u32 crtc_id;
++    __s32 x;
++    __s32 y;
++    __u32 width;
++    __u32 height;
++    /* driver specific handle */
++    __u32 handle;
++};
++
++struct drm_mode_cursor2 {
++    __u32 flags;
++    __u32 crtc_id;
++    __s32 x;
++    __s32 y;
++    __u32 width;
++    __u32 height;
++    /* driver specific handle */
++    __u32 handle;
++    __s32 hot_x;
++    __s32 hot_y;
++};
++
++struct drm_mode_crtc_lut {
++    __u32 crtc_id;
++    __u32 gamma_size;
++
++    /* pointers to arrays */
++    __u64 red;
++    __u64 green;
++    __u64 blue;
++};
++
++#define DRM_MODE_PAGE_FLIP_EVENT 0x01
++#define DRM_MODE_PAGE_FLIP_ASYNC 0x02
++#define DRM_MODE_PAGE_FLIP_FLAGS (DRM_MODE_PAGE_FLIP_EVENT|DRM_MODE_PAGE_FLIP_ASYNC)
++
++/*
++ * Request a page flip on the specified crtc.
++ *
++ * This ioctl will ask KMS to schedule a page flip for the specified
++ * crtc.  Once any pending rendering targeting the specified fb (as of
++ * ioctl time) has completed, the crtc will be reprogrammed to display
++ * that fb after the next vertical refresh.  The ioctl returns
++ * immediately, but subsequent rendering to the current fb will block
++ * in the execbuffer ioctl until the page flip happens.  If a page
++ * flip is already pending as the ioctl is called, EBUSY will be
++ * returned.
++ *
++ * The ioctl supports one flag, DRM_MODE_PAGE_FLIP_EVENT, which will
++ * request that drm sends back a vblank event (see drm.h: struct
++ * drm_event_vblank) when the page flip is done.  The user_data field
++ * passed in with this ioctl will be returned as the user_data field
++ * in the vblank event struct.
++ *
++ * The reserved field must be zero until we figure out something
++ * clever to use it for.
++ */
++
++struct drm_mode_crtc_page_flip {
++    __u32 crtc_id;
++    __u32 fb_id;
++    __u32 flags;
++    __u32 reserved;
++    __u64 user_data;
++};
++
++/* create a dumb scanout buffer */
++struct drm_mode_create_dumb {
++    __u32 height;
++    __u32 width;
++    __u32 bpp;
++    __u32 flags;
++    /* handle, pitch, size will be returned */
++    __u32 handle;
++    __u32 pitch;
++    __u64 size;
++};
++
++/* set up for mmap of a dumb scanout buffer */
++struct drm_mode_map_dumb {
++    /** Handle for the object being mapped. */
++    __u32 handle;
++    __u32 pad;
++    /**
++     * Fake offset to use for subsequent mmap call
++     *
++     * This is a fixed-size type for 32/64 compatibility.
++     */
++    __u64 offset;
++};
++
++struct drm_mode_destroy_dumb {
++    __u32 handle;
++};
++
++/* page-flip flags are valid, plus: */
++#define DRM_MODE_ATOMIC_TEST_ONLY 0x0100
++#define DRM_MODE_ATOMIC_NONBLOCK  0x0200
++#define DRM_MODE_ATOMIC_ALLOW_MODESET 0x0400
++
++#define DRM_MODE_ATOMIC_FLAGS (\
++        DRM_MODE_PAGE_FLIP_EVENT |\
++        DRM_MODE_PAGE_FLIP_ASYNC |\
++        DRM_MODE_ATOMIC_TEST_ONLY |\
++        DRM_MODE_ATOMIC_NONBLOCK |\
++        DRM_MODE_ATOMIC_ALLOW_MODESET)
++
++struct drm_mode_atomic {
++    __u32 flags;
++    __u32 count_objs;
++    __u64 objs_ptr;
++    __u64 count_props_ptr;
++    __u64 props_ptr;
++    __u64 prop_values_ptr;
++    __u64 reserved;
++    __u64 user_data;
++};
++
++/**
++ * Create a new 'blob' data property, copying length bytes from data pointer,
++ * and returning new blob ID.
++ */
++struct drm_mode_create_blob {
++    /** Pointer to data to copy. */
++    __u64 data;
++    /** Length of data to copy. */
++    __u32 length;
++    /** Return: new property ID. */
++    __u32 blob_id;
++};
++
++/**
++ * Destroy a user-created blob property.
++ */
++struct drm_mode_destroy_blob {
++    __u32 blob_id;
++};
++
++struct drm_rockchip_gem_phys {
++    __u32 handle;
++    __u32 phy_addr;
++};
++
++#endif  // SRC_RT_BASE_INCLUDE_DRM_MODE_H_
+diff --git a/component/osal/include/sculptor/sculptor.h b/component/osal/include/sculptor/sculptor.h
+new file mode 100755
+index 0000000..484682d
+--- /dev/null
++++ b/component/osal/include/sculptor/sculptor.h
+@@ -0,0 +1,98 @@
++
++#ifndef SCULPTOR_H
++#define SCULPTOR_H
++
++#include <stdint.h>
++
++typedef void * sculptor_context;
++typedef void * sculptor_buffer;
++
++enum {
++    SCULPTOR_ERROR_OKAY = 0,
++    SCULPTOR_ERROR_INVALID_PARAMETER,
++    SCULPTOR_ERROR_INVALID_CONTEXT,
++    SCULPTOR_ERROR_INVALID_OPERATION,
++    SCULPTOR_ERROR_LIST_FULL,
++    SCULPTOR_ERROR_NULL_PTR,
++    SCULPTOR_ERROR_NOMEM,
++};
++
++enum {
++    SCULPTOR_SCALE_TYPE_NONE,
++    SCULPTOR_SCALE_TYPE_ASPECT_RATIO,
++    SCULPTOR_SCALE_TYPE_CUSTOM,
++    SCULPTOR_SCALE_TYPE_MAX
++};
++
++enum {
++    SCULPTOR_PROCESS_TYPE_COPY = 1,
++    SCULPTOR_PROCESS_TYPE_SR = 2,
++    SCULPTOR_PROCESS_TYPE_MEMC = 4,
++    SCULPTOR_PROCESS_TYPE_FACE_ENHANCE = 8,
++};
++
++typedef void (*sculptor_callback)(void *data);
++
++typedef struct sclptor_scale_attrs {
++    uint32_t type;
++    uint32_t x, y;
++    uint32_t w, h;
++} sclptor_scale_attrs_t;
++
++typedef struct sculptor_attrs {
++    sclptor_scale_attrs_t scale;
++} sculptor_attrs_t;
++
++typedef struct sculptor_dci_info {
++    int64_t offset;
++    int64_t size;
++} sculptor_dci_info_t;
++
++typedef struct sculptor_frame {
++    uint32_t prime_fd;
++    void * addrs;
++    uint32_t size;
++
++    uint32_t width;
++    uint32_t height;
++    uint32_t vir_width;
++    uint32_t vir_height;
++    uint32_t stride;
++
++    uint32_t drm_format;
++    uint64_t drm_modifier;
++
++    uint64_t pts;
++
++    sculptor_callback callback;
++    void * private_data;
++} sculptor_frame_t;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int sculptor_create(uint32_t type, sculptor_context *ctx);
++int sculptor_destroy(sculptor_context ctx);
++int sculptor_reset(sculptor_context ctx);
++
++int sculptor_set_attrs(sculptor_context ctx, sculptor_attrs_t *attrs);
++int sculptor_sculpt(sculptor_context ctx, sculptor_frame_t *frame);
++
++sculptor_buffer sculptor_get_out_buffer(sculptor_context ctx);
++sculptor_buffer sculptor_buffer_commit(sculptor_context ctx, sculptor_frame_t *info);
++int sculptor_buffer_release(sculptor_context ctx, sculptor_buffer buffer);
++int sculptor_buffer_ref_add(sculptor_context ctx, sculptor_buffer buffer);
++int sculptor_buffer_ref_dec(sculptor_context ctx, sculptor_buffer buffer);
++int sculptor_buffer_get_unused_counts(sculptor_context ctx);
++int scluptor_check_input_cache_full(sculptor_context ctx);
++
++/* get buffer infos*/
++int sculptor_buffer_get_dci_info(sculptor_context ctx, sculptor_buffer buffer, sculptor_dci_info_t* dci);
++int sculptor_buffer_get_frame_infos(sculptor_context ctx, sculptor_buffer buffer, sculptor_frame_t* info);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* sculptor_H */
+\ No newline at end of file
+diff --git a/component/video/Android.bp b/component/video/Android.bp
+index 9a58fcc..31230f2 100644
+--- a/component/video/Android.bp
++++ b/component/video/Android.bp
+@@ -10,6 +10,7 @@ cc_library_static {
+     defaults: [
+         "libcodec2_rk-defaults",
+         "libcodec2_rk_sanitize_signed-defaults",
++        "rk_projector_c2_cc_defaults",
+     ],
+ 
+     srcs: [
+diff --git a/component/video/C2RKMpiDec.cpp b/component/video/C2RKMpiDec.cpp
+index 1a8b600..c6efa35 100644
+--- a/component/video/C2RKMpiDec.cpp
++++ b/component/video/C2RKMpiDec.cpp
+@@ -39,6 +39,7 @@
+ #include "C2RKTunneledSession.h"
+ #include "C2RKPropsDef.h"
+ #include "C2RKVersion.h"
++#include <sys/system_properties.h>
+ 
+ namespace android {
+ 
+@@ -696,6 +697,20 @@ static int32_t frameReadyCb(void *ctx, void *mppCtx, int32_t cmd, void *frame) {
+     return 0;
+ }
+ 
++#if SCULPTOR_ENABLE
++static void sculptorFrameReadyCb(void* ctx) {
++    C2RKMpiDec *decoder = (C2RKMpiDec *)ctx;
++    decoder->postSculptorFrameReady();
++    return;
++}
++
++static void ensureDecoderStateCb(void* ctx) {
++    C2RKMpiDec *decoder = (C2RKMpiDec *)ctx;
++    decoder->postEnsureDecoderState();
++    return;
++}
++#endif
++
+ void C2RKMpiDec::WorkHandler::waitAllMsgFlushed() {
+     sp<AMessage> msg = new AMessage(WorkHandler::kWhatFlushMessage, this);
+ 
+@@ -718,6 +733,20 @@ void C2RKMpiDec::WorkHandler::onMessageReceived(const sp<AMessage> &msg) {
+             sp<AMessage> response = new AMessage;
+             response->postReply(replyID);
+         } break;
++#if SCULPTOR_ENABLE
++        case kWhatEnsureDecoderState: {
++            C2RKMpiDec *thiz = nullptr;
++            if (msg->findPointer("thiz", (void **)(&thiz)) && thiz) {
++                thiz->ensureDecoderState();
++            }
++        } break;
++        case kWhatSculptorFrameReady: {
++            C2RKMpiDec *thiz = nullptr;
++            if (msg->findPointer("thiz", (void **)(&thiz)) && thiz) {
++                thiz->onSculptorFrameReady();
++            }
++        } break;
++#endif
+         default: {
+             c2_err("Unrecognized msg: %d", msg->what());
+         } break;
+@@ -750,6 +779,14 @@ C2RKMpiDec::C2RKMpiDec(
+       mDump(new C2RKDump),
+       mLooper(nullptr),
+       mHandler(nullptr),
++#if SCULPTOR_ENABLE
++      mSculptorCtrl(new SculptorCtrl),
++      mSculptorLooper(nullptr),
++      mSculptorHandler(nullptr),
++      mGiveBackLooper(nullptr),
++      mGiveBackHandler(nullptr),
++      mDisableSync(false),
++#endif
+       mMppCtx(nullptr),
+       mMppMpi(nullptr),
+       mCodingType(MPP_VIDEO_CodingUnused),
+@@ -821,7 +858,17 @@ c2_status_t C2RKMpiDec::onInit() {
+ c2_status_t C2RKMpiDec::onStop() {
+     c2_log_func_enter();
+     if (!mFlushed) {
++#if SCULPTOR_ENABLE
++        onFlush_sm();
++        if (mSculptorCtrl && mSculptorCtrl->getSculptorCtx()) {
++            mSculptorCtrl->deinitSculptor();
++            //delete mSculptorCtrl;
++            //mSculptorCtrl = nullptr;
++            clearOutBuffers();
++        }
++#else
+         return onFlush_sm();
++#endif
+     }
+ 
+     return C2_OK;
+@@ -846,6 +893,16 @@ void C2RKMpiDec::onRelease() {
+         onFlush_sm();
+     }
+ 
++#if SCULPTOR_ENABLE
++    if (mSculptorCtrl) {
++        if(mSculptorCtrl->getSculptorCtx())
++            mSculptorCtrl->deinitSculptor();
++        delete mSculptorCtrl;
++        mSculptorCtrl = nullptr;
++        clearOutBuffers();
++    }
++#endif
++
+     if (mBlockPool) {
+         mBlockPool.reset();
+     }
+@@ -887,17 +944,36 @@ c2_status_t C2RKMpiDec::onFlush_sm() {
+         mOutputEos = false;
+         mSignalledError = false;
+ 
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl && mSculptorCtrl->getSculptorCtx())
++           mSculptorCtrl->resetSculptor();
++#endif
++
+         if (mMppMpi) {
+             mMppMpi->reset(mMppCtx);
+         }
+ 
++#if SCULPTOR_ENABLE
++        if (mSculptorHandler) {
++            mSculptorHandler->waitAllMsgFlushed();
++        }
++        if (mGiveBackHandler) {
++            mGiveBackHandler->waitAllMsgFlushed();
++        }
++#endif
+         if (mHandler) {
+             mHandler->waitAllMsgFlushed();
+         }
+ 
+         Mutex::Autolock autoLock(mBufferLock);
++
++#if SCULPTOR_ENABLE
++        if(!mSculptorCtrl->getSculptorCtx())
++#endif
++        {
+         clearOutBuffers();
+         mpp_buffer_group_clear(mFrmGrp);
++        }
+ 
+         if (mOutBlock) {
+             mOutBlock.reset();
+@@ -922,6 +998,33 @@ c2_status_t C2RKMpiDec::setupAndStartLooper() {
+             mLooper->registerHandler(mHandler);
+         }
+     }
++
++#if SCULPTOR_ENABLE
++    if (mGiveBackLooper == nullptr) {
++        status_t err = OK;
++        mGiveBackLooper = new ALooper;
++        mGiveBackHandler = new WorkHandler;
++
++        mGiveBackLooper->setName("C2GiveBackLooper");
++        err = mGiveBackLooper->start();
++        if (err == OK) {
++            mGiveBackLooper->registerHandler(mGiveBackHandler);
++        }
++    }
++
++    if (mSculptorLooper == nullptr) {
++        status_t err = OK;
++        mSculptorLooper = new ALooper;
++        mSculptorHandler = new WorkHandler;
++
++        mSculptorLooper->setName("C2SculptorLooper");
++        err = mSculptorLooper->start();
++        if (err == OK) {
++            mSculptorLooper->registerHandler(mSculptorHandler);
++        }
++    }
++#endif
++
+     return (c2_status_t)err;
+ }
+ 
+@@ -934,6 +1037,26 @@ void C2RKMpiDec::stopAndReleaseLooper() {
+         mLooper->stop();
+         mLooper.clear();
+     }
++
++#if SCULPTOR_ENABLE
++    if (mGiveBackLooper != nullptr) {
++        if (mGiveBackHandler != nullptr) {
++            mGiveBackLooper->unregisterHandler(mGiveBackHandler->id());
++            mGiveBackHandler.clear();
++        }
++        mGiveBackLooper->stop();
++        mGiveBackLooper.clear();
++    }
++
++    if (mSculptorLooper != nullptr) {
++        if (mSculptorHandler != nullptr) {
++            mSculptorLooper->unregisterHandler(mSculptorHandler->id());
++            mSculptorHandler.clear();
++        }
++        mSculptorLooper->stop();
++        mSculptorLooper.clear();
++    }
++#endif
+ }
+ 
+ uint32_t C2RKMpiDec::getFbcOutputMode(const std::unique_ptr<C2Work> &work) {
+@@ -1216,7 +1339,7 @@ c2_status_t C2RKMpiDec::initDecoder(const std::unique_ptr<C2Work> &work) {
+         mTunneled = mIntf->getIsTunnelMode();
+     }
+ 
+-    c2_info("init: w %d h %d coding %s", mWidth, mHeight, toStr_Coding(mCodingType));
++    c2_info("init: w %d h %d coding %s format 0x%08x", mWidth, mHeight, toStr_Coding(mCodingType), mColorFormat);
+ 
+     err = mpp_create(&mMppCtx, &mMppMpi);
+     if (err != MPP_OK) {
+@@ -1319,6 +1442,10 @@ c2_status_t C2RKMpiDec::initDecoder(const std::unique_ptr<C2Work> &work) {
+         c2_info("init: hor %d ver %d color 0x%08x", mHorStride, mVerStride, mColorFormat);
+     }
+ 
++#if SCULPTOR_ENABLE
++  if (!mSculptorCtrl->getSculptorMode(mWidth, mHeight, mColorFormat))
++#endif
++  {
+     err = mpp_buffer_group_get_external(&mFrmGrp, MPP_BUFFER_TYPE_ION);
+     if (err != MPP_OK) {
+         c2_err("failed to get buffer_group, err %d", err);
+@@ -1330,6 +1457,7 @@ c2_status_t C2RKMpiDec::initDecoder(const std::unique_ptr<C2Work> &work) {
+         c2_err("failed to set buffer group, err %d", err);
+         goto error;
+     }
++  }
+ 
+     {
+         /* set output frame callback  */
+@@ -1392,6 +1520,16 @@ void C2RKMpiDec::finishWork(OutWorkEntry entry) {
+             IntfImpl::Lock lock = mIntf->lock();
+             c2Buffer->setInfo(mIntf->getColorAspects_l());
+         }
++
++#if 0 //SCULPTOR_ENABLE
++        if (isPendingFlushing()) {
++            c2_trace("ignore frame output since pending flush");
++            if (mSculptorCtrl->getSculptorCtx())
++                commitBufferToSculptor(outblock);
++            return;
++        }
++#endif
++
+     }
+ 
+     uint32_t inFlags = 0;
+@@ -1499,6 +1637,28 @@ void C2RKMpiDec::process(
+             return;
+         }
+         mStarted = true;
++
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl) {
++            sclptor_init_sizes_t parms = mSculptorCtrl->initSculptor(mWidth, mHeight);
++            if(parms.width > 0){
++                mWidth = parms.width;
++                mHeight = parms.height;
++                mHorStride = parms.wstride;
++                mVerStride = parms.hstride;
++                mColorFormat = MPP_FMT_YUV420SP;
++            }
++/*
++            char prop[PROP_VALUE_MAX + 1];
++            int len = __system_property_get("sys.top_package", prop);
++            if(len > 0){
++                if(strcmp(prop,"com.ktcp.video") == 0 || strcmp(prop,"com.gitvdemo.video") == 0)
++                     mDisableSync = true;
++            }
++*/
++        }
++#endif
++
+     }
+ 
+     if (mSignalledInputEos || mSignalledError) {
+@@ -1534,6 +1694,13 @@ void C2RKMpiDec::process(
+     }
+ 
+     if (mFlushed) {
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl && mSculptorCtrl->getSculptorCtx()) {
++            //ensureDecoderStateCb(this);
++            ensureDecoderState();
++        } else
++    #endif
++        {
+         err = ensureDecoderState();
+         if (err != C2_OK) {
+             mSignalledError = true;
+@@ -1541,15 +1708,21 @@ void C2RKMpiDec::process(
+             work->result = C2_CORRUPTED;
+             return;
+         }
++        }
+     }
+ 
+     err = sendpacket(inData, inSize, timestamp, flags);
+     if (err != C2_OK) {
+         c2_err("failed to send packet, pts %lld", timestamp);
++#if SCULPTOR_ENABLE
++        if (!(mSculptorCtrl->getSculptorCtx() && mSculptorCtrl->getSculptorMode(mWidth, mHeight, mColorFormat)))
++#endif
++        {
+         mSignalledError = true;
+         work->workletsProcessed = 1u;
+         work->result = C2_CORRUPTED;
+         return;
++        }
+     }
+ 
+     // fillEmpty for old worklet
+@@ -1685,6 +1858,11 @@ c2_status_t C2RKMpiDec::updateFbcModeIfNeeded() {
+     uint32_t format  = mColorFormat;
+     uint32_t fbcMode = getFbcOutputMode();
+ 
++#if SCULPTOR_ENABLE
++    if (mSculptorCtrl->getSculptorCtx() && mSculptorCtrl->getSculptorMode(mWidth, mHeight, mColorFormat))
++       return C2_OK;
++#endif
++
+     if (!MPP_FRAME_FMT_IS_FBC(format)) {
+         if (fbcMode) {
+             format |= MPP_FRAME_FBC_AFBC_V2;
+@@ -1733,6 +1911,57 @@ c2_status_t C2RKMpiDec::updateFbcModeIfNeeded() {
+     return C2_OK;
+ }
+ 
++#if SCULPTOR_ENABLE
++c2_status_t C2RKMpiDec::commitBufferToSculptor(std::shared_ptr<C2GraphicBlock> block) {
++    c2_status_t err = C2_OK;
++    auto c2Handle = block->handle();
++    uint32_t fd = c2Handle->data[0];
++    buffer_handle_t handle = nullptr;
++
++    err = importGraphicBuffer(c2Handle, &handle);
++    if (err != C2_OK) return err;
++
++    uint32_t bufferId = C2RKGrallocOps::get()->getBufferId(handle);
++
++    OutBuffer *buffer = findOutBuffer(bufferId);
++    c2_trace("commitBufferToSculptor: buffer %p bufferId %d ", buffer, bufferId);
++    if (buffer) {
++        /* commit this buffer back to sculptor */
++        sculptor_buffer sculptorBuffer = buffer->sculptorBuffer;
++        if (sculptorBuffer) {
++            sculptor_buffer_ref_dec(mSculptorCtrl->getSculptorCtx(), sculptorBuffer);
++        }
++        buffer->mBlock = block;
++        buffer->mStatus = OutBuffer::OWNED_BY_SCULPTOR;
++
++        c2_trace("put this buffer, slot %d fd %d sculptorBuffer %p",
++                 bufferId, fd, sculptorBuffer);
++    } else {
++        sculptor_buffer sculptorBuffer = mSculptorCtrl->commitSculptorBuffer(fd,
++                                C2RKGrallocOps::get()->getAllocationSize(handle),
++                                mWidth, mHeight,mHorStride, mVerStride,
++                                C2RKGrallocOps::get()->getPixelStride(handle), sculptorFrameReadyCb,
++                                this);
++
++        OutBuffer *buffer = new OutBuffer;
++        buffer->mBufferId  = bufferId;
++        buffer->mMppBuffer = NULL;
++        buffer->sculptorBuffer = sculptorBuffer;
++        buffer->mBlock = block;
++        buffer->mStatus = OutBuffer::OWNED_BY_SCULPTOR;
++        sculptor_buffer_ref_dec(mSculptorCtrl->getSculptorCtx(), sculptorBuffer);
++        mOutBuffers.push(buffer);
++
++        c2_trace("sculptor import this buffer, slot %d fd %d size %d buffer %p  listSize %d ",
++                 bufferId, fd, (int)C2RKGrallocOps::get()->getAllocationSize(handle), buffer, (int)mOutBuffers.size());
++    }
++
++    freeGraphicBuffer(handle);
++
++    return C2_OK;
++}
++#endif
++
+ c2_status_t C2RKMpiDec::importBufferToMpp(std::shared_ptr<C2GraphicBlock> block) {
+     if (!block) {
+         c2_err("null block import error");
+@@ -1980,6 +2209,14 @@ c2_status_t C2RKMpiDec::ensureDecoderState() {
+     std::shared_ptr<C2GraphicBlock> outblock;
+     uint32_t count = mOutputDelay - getOutBufferCountOwnByMpi() + 1;
+ 
++#if SCULPTOR_ENABLE
++    if (mSculptorCtrl->getSculptorCtx())
++        count = mOutputDelay - getOutBufferCountOwnBySculptor() + 1;
++
++    c2_trace("%s-%d count %d format 0x%x getOutBufferCountOwnBySculptor %d getOutBufferCountOwnByMpi %d",
++        __FUNCTION__, __LINE__, count, format, getOutBufferCountOwnBySculptor(), getOutBufferCountOwnByMpi());
++#endif
++
+     uint32_t i = 0;
+     for (i = 0; i < count; i++) {
+         err = mBlockPool->fetchGraphicBlock(blockW, blockH, format,
+@@ -1990,6 +2227,11 @@ c2_status_t C2RKMpiDec::ensureDecoderState() {
+             break;
+         }
+ 
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl->getSculptorCtx())
++            err = commitBufferToSculptor(outblock);
++        else
++#endif
+         err = importBufferToMpp(outblock);
+         if (err != C2_OK) {
+             c2_err("failed to commit buffer");
+@@ -2013,6 +2255,105 @@ void C2RKMpiDec::postFrameReady() {
+     }
+ }
+ 
++#if SCULPTOR_ENABLE
++void C2RKMpiDec::postSculptorFrameReady() {
++    c2_trace("postSculptorFrameReady ---------------------------------in");
++    sp<AMessage> msg = new AMessage(WorkHandler::kWhatSculptorFrameReady, mSculptorHandler);
++    msg->setPointer("thiz", this);
++    msg->post();
++}
++
++void C2RKMpiDec::postEnsureDecoderState() {
++    c2_trace("postEnsureDecoderState:giveback buffer");
++    sp<AMessage> msg = new AMessage(WorkHandler::kWhatEnsureDecoderState, mGiveBackHandler);
++    msg->setPointer("thiz", this);
++    msg->post();
++}
++
++c2_status_t C2RKMpiDec::onSculptorFrameReady() {
++    c2_status_t err = C2_OK;
++    c2_trace_func_enter();
++
++sculptoroutframe:
++    OutWorkEntry entry;
++    memset(&entry, 0, sizeof(entry));
++
++    err = getSculptorOutFrame(&entry);
++    if (err == C2_OK) {
++        c2_trace("onSculptorFrameReady: get out frame & before finishWork==");
++        finishWork(entry);
++        if(mDisableSync)
++           ensureDecoderStateCb(this);
++        else
++           ensureDecoderState();
++        c2_trace("onSculptorFrameReady: get out frame & after finishWork---");
++    } else if (err == C2_NOT_FOUND) {
++        goto sculptoroutframe;
++    } else if (err == C2_CORRUPTED) {
++        c2_err("signalling error");
++        mSignalledError = true;
++    }
++
++    return err;
++}
++
++c2_status_t C2RKMpiDec::getSculptorOutFrame(OutWorkEntry* entry) {
++    c2_status_t  ret = C2_OK;
++    int          err = MPP_OK;
++    uint32_t     flags = 0;
++
++    uint64_t     pts = 0;
++    OutBuffer*   outBuffer = nullptr;
++    sculptor_buffer sculptorBuffer = nullptr;
++    sculptor_dci_info dci_info;
++
++    if(isPendingFlushing()){
++        c2_trace("skip buffer when Flushed---");
++        return C2_CANCELED;
++    }
++
++    sculptorBuffer = sculptor_get_out_buffer(mSculptorCtrl->getSculptorCtx());
++    if (sculptorBuffer == nullptr) {//err != MPP_OK ||
++        c2_err(" sculptor_get_out_buffer null ,skip =====================");
++        return C2_CANCELED;
++    }
++
++    outBuffer = findOutBufferBySculptorBuffer(sculptorBuffer);
++    if (!outBuffer) {
++        ret = C2_CANCELED;
++        c2_err("outBuffer maybe clearout,get outdated sculptorBuffer %p,skip", sculptorBuffer);
++        goto cleanUp;
++    }
++
++    if (outBuffer) {
++        sculptor_frame_t sculptorFrameInfos;
++        sculptor_buffer_get_frame_infos(mSculptorCtrl->getSculptorCtx(), sculptorBuffer, &sculptorFrameInfos);
++        outBuffer->mStatus = OutBuffer::OWNED_BY_US;
++        entry->outblock = outBuffer->mBlock;
++        entry->timestamp = sculptorFrameInfos.pts;
++
++        entry->flags = flags;
++
++        pts = sculptorFrameInfos.pts;
++        sculptor_buffer_ref_add(mSculptorCtrl->getSculptorCtx(), sculptorBuffer);
++
++        sculptor_buffer_get_dci_info(mSculptorCtrl->getSculptorCtx(),sculptorBuffer,&dci_info);
++	    configFramePqMeta(dci_info,outBuffer->mBlock);
++
++        //c2_trace("get one sculptor frame [%d:%d] stride [%d:%d] pts %lld err %d index %d ,dci offset %lld",
++        //        sculptorFrameInfos.width, sculptorFrameInfos.height, sculptorFrameInfos.vir_width, sculptorFrameInfos.vir_height, pts, err, outBuffer->index,dci_info.offset);
++    } else {
++        c2_trace("getSculptorOutFrame failed skip-------------------------");
++        ret = C2_CANCELED;
++    }
++
++cleanUp:
++    entry->flags = flags;
++
++    return ret;
++}
++#endif
++
+ c2_status_t C2RKMpiDec::onFrameReady() {
+     c2_status_t err = C2_BAD_STATE;
+ 
+@@ -2023,6 +2364,12 @@ outframe:
+ 
+     err = getoutframe(&entry);
+     if (err == C2_OK) {
++#if SCULPTOR_ENABLE
++        if (entry.flags & OutWorkEntry::FLAGS_SCULPTOR_FRAME) {
++
++        } else
++#endif
++        {
+         finishWork(entry);
+         /* Avoid stock frame, continue to search available output */
+         err = ensureDecoderState();
+@@ -2030,6 +2377,7 @@ outframe:
+             mSignalledError = true;
+             return err;
+         }
++        }
+         goto outframe;
+     } else if (err == C2_CORRUPTED) {
+         c2_err("signalling error");
+@@ -2084,12 +2432,17 @@ c2_status_t C2RKMpiDec::sendpacket(uint8_t *data, size_t size, uint64_t pts, uin
+              * fetchGraphicBlock get blocked. I still don't know is there a better
+              * way to know player get paused?
+              */
++#if SCULPTOR_ENABLE
++            if (mSculptorCtrl && mSculptorCtrl->getSculptorCtx())
++                retry = 0;
++#else
+             if (mBufferLock.tryLock() == NO_ERROR) {
+                 c2_warn("try to resend packet, pts %lld", pts);
+                 mBufferLock.unlock();
+             } else {
+                 retry = 0;
+             }
++#endif
+         }
+ 
+         usleep(3 * 1000);
+@@ -2104,6 +2457,25 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+     c2_status_t ret = C2_OK;
+     MPP_RET     err = MPP_OK;
+     MppFrame  frame = nullptr;
++    uint32_t flags   = 0;
++
++#if SCULPTOR_ENABLE
++    if (mSculptorCtrl->getSculptorCtx()) {
++        int cacheFull = scluptor_check_input_cache_full(mSculptorCtrl->getSculptorCtx());
++        int numUnusedCounts = sculptor_buffer_get_unused_counts(mSculptorCtrl->getSculptorCtx());
++        int count = mOutputDelay - getOutBufferCountOwnBySculptor() + 1;
++        int countLimit = mOutputDelay/3 - 1;
++        if(cacheFull != SCULPTOR_ERROR_OKAY || (numUnusedCounts < countLimit) || (count > countLimit)){
++           c2_trace("mFlushed:%d,sculptor get cache is full or unused counts:%d less than %d ,count:%d delay to decode_get_frame"
++                    , mFlushed, numUnusedCounts, countLimit, count);
++           flags |= OutWorkEntry::FLAGS_SCULPTOR_FRAME;
++           entry->flags = flags;
++           usleep(3 * 1000);
++           if(!mFlushed && !isPendingFlushing())
++              return ret;
++        }
++    }
++#endif
+ 
+     err = mMppMpi->decode_get_frame(mMppCtx, &frame);
+     if (err != MPP_OK || frame == nullptr) {
+@@ -2117,7 +2489,6 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+     uint32_t error   = mpp_frame_get_errinfo(frame);
+     uint32_t eos     = mpp_frame_get_eos(frame);
+     uint64_t pts     = mpp_frame_get_pts(frame);
+-    uint32_t flags   = 0;
+ 
+     MppFrameFormat format = mpp_frame_get_fmt(frame);
+     MppBuffer   mppBuffer = mpp_frame_get_buffer(frame);
+@@ -2135,7 +2506,16 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+             goto cleanUp;
+         }
+ 
+-        Mutex::Autolock autoLock(mBufferLock);
++#if SCULPTOR_ENABLE
++        if(mSculptorCtrl->getSculptorCtx()){
++            c2_info("infochange  sculptor need skip frame");
++            //sculptor_reset(mSculptorCtrl->getSculptorCtx());
++            mMppMpi->control(mMppCtx, MPP_DEC_SET_INFO_CHANGE_READY, nullptr);
++            flags |= OutWorkEntry::FLAGS_SCULPTOR_FRAME;
++            ret = C2_CANCELED;
++            goto cleanUp;
++        }
++#endif
+ 
+         if (mTunneled) {
+             mTunneledSession->reset();
+@@ -2182,12 +2562,24 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+     if (eos) {
+         c2_info("get output eos.");
+         flags |= OutWorkEntry::FLAGS_EOS;
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl && mSculptorCtrl->getSculptorCtx())
++            mSculptorCtrl->resetSculptor();
++#endif
+         // ignore null frame with eos
+         if (!mppBuffer) goto cleanUp;
+     }
+ 
+     if (error) {
+         c2_warn("skip error frame with pts %lld", pts);
++
++#if SCULPTOR_ENABLE
++        if (mSculptorCtrl->getSculptorCtx()){
++            flags |= OutWorkEntry::FLAGS_SCULPTOR_FRAME;
++            //ret = C2_CANCELED;
++            //goto cleanUp;
++        }
++#endif
+         goto cleanUp;
+     }
+ 
+@@ -2196,6 +2588,18 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+         goto cleanUp;
+     }
+ 
++#if SCULPTOR_ENABLE
++    if (mSculptorCtrl->getSculptorCtx()) {
++        if (mppBuffer) {
++            mpp_buffer_inc_ref(mppBuffer);
++            c2_trace("=====doSculptorProcess=====");
++            mSculptorCtrl->doSculptorProcess(frame);
++        }
++        flags |= OutWorkEntry::FLAGS_SCULPTOR_FRAME;
++        goto cleanUp;
++    }
++#endif
++
+     outBuffer = findOutBuffer(mppBuffer);
+     if (!outBuffer) {
+         ret = C2_CORRUPTED;
+@@ -2251,6 +2655,9 @@ c2_status_t C2RKMpiDec::getoutframe(OutWorkEntry *entry) {
+             ret = C2_CANCELED;
+         }
+         // signal buffer occupied by users
++#if SCULPTOR_ENABLE
++        if(!(mSculptorCtrl->getSculptorCtx() && mSculptorCtrl->getSculptorMode(mWidth, mHeight, mColorFormat)))
++#endif
+         outBuffer->holdThisBuffer();
+     }
+ 
+@@ -2367,6 +2774,37 @@ c2_status_t C2RKMpiDec::configFrameHdrMeta(
+     return err;
+ }
+ 
++#if SCULPTOR_ENABLE
++c2_status_t C2RKMpiDec::configFramePqMeta(
++        sculptor_dci_info &dci_info, std::shared_ptr<C2GraphicBlock> block) {
++    c2_status_t err = C2_OK;
++
++    if (block->handle()) {
++        int64_t pqMetaOffset = dci_info.offset;
++        int64_t pqMetaSize = dci_info.size;
++
++        if (pqMetaOffset && pqMetaSize) {
++            buffer_handle_t handle = nullptr;
++            auto c2Handle = block->handle();
++
++            err = importGraphicBuffer(c2Handle, &handle);
++            if (err != C2_OK) {
++                c2_err("failed to import graphic buffer");
++                return err;
++            }
++
++            if (!C2RKVdecExtendFeature::configFramePqMeta(handle, pqMetaOffset)) {
++                c2_trace("failed to config configFramePqMeta");
++            }
++
++            freeGraphicBuffer(handle);
++        }
++    }
++
++    return err;
++}
++#endif
++
+ class C2RKMpiDecFactory : public C2ComponentFactory {
+ public:
+     explicit C2RKMpiDecFactory(std::string name)
+diff --git a/component/video/C2RKMpiDec.h b/component/video/C2RKMpiDec.h
+index 1d22af8..59180cb 100644
+--- a/component/video/C2RKMpiDec.h
++++ b/component/video/C2RKMpiDec.h
+@@ -21,7 +21,7 @@
+ #include "C2RKInterface.h"
+ #include "C2RKDump.h"
+ #include "rk_mpi.h"
+-
++#include "SculptorCtrl.h"
+ #include <utils/Vector.h>
+ 
+ namespace android {
+@@ -57,15 +57,30 @@ public:
+     void postFrameReady();
+     c2_status_t onFrameReady();
+ 
++#if SCULPTOR_ENABLE
++    void postEnsureDecoderState();
++    void postSculptorFrameReady();
++    c2_status_t onSculptorFrameReady();
++#endif
++
+ private:
+     struct OutBuffer {
+         enum Status {
+             OWNED_BY_MPP = 0,
+             OWNED_BY_US,
+-        };
++#if SCULPTOR_ENABLE
++            OWNED_BY_SCULPTOR,
++#endif
++    };
+ 
+         /* index to find this buffer */
+         uint32_t  mBufferId;
++
++#if SCULPTOR_ENABLE
++        /* sculptor buffer */
++        void*   sculptorBuffer;
++#endif
++
+         /* who own this buffer */
+         Status    mStatus;
+         /* mpp buffer */
+@@ -86,6 +101,9 @@ private:
+             FLAGS_EOS         = 0x1,
+             FLAGS_ERROR_FRAME = 0x2,
+             FLAGS_INFO_CHANGE = 0x4,
++#if SCULPTOR_ENABLE
++            FLAGS_SCULPTOR_FRAME  = 0x100,
++#endif
+         };
+ 
+         std::shared_ptr<C2GraphicBlock> outblock;
+@@ -98,6 +116,10 @@ private:
+         enum {
+             kWhatFrameReady,
+             kWhatFlushMessage,
++#if SCULPTOR_ENABLE
++            kWhatEnsureDecoderState,
++            kWhatSculptorFrameReady,
++#endif
+         };
+ 
+         WorkHandler() {}
+@@ -133,6 +155,15 @@ private:
+     Vector<OutBuffer*>   mOutBuffers;
+     C2RKTunneledSession *mTunneledSession;
+ 
++#if SCULPTOR_ENABLE
++    sp<ALooper>     mSculptorLooper;
++    sp<WorkHandler> mSculptorHandler;
++    bool            mDisableSync;
++    sp<ALooper>     mGiveBackLooper;
++    sp<WorkHandler> mGiveBackHandler;
++    SculptorCtrl *mSculptorCtrl;
++#endif
++
+     uint32_t mWidth;
+     uint32_t mHeight;
+     uint32_t mHorStride;
+@@ -213,6 +244,12 @@ private:
+     c2_status_t sendpacket(uint8_t *data, size_t size, uint64_t pts, uint32_t flags);
+     c2_status_t getoutframe(OutWorkEntry *entry);
+ 
++#if SCULPTOR_ENABLE
++    c2_status_t getSculptorOutFrame(OutWorkEntry* entry);
++    c2_status_t commitBufferToSculptor(std::shared_ptr<C2GraphicBlock> block);
++    c2_status_t configFramePqMeta(sculptor_dci_info &dci_info, std::shared_ptr<C2GraphicBlock> block);
++#endif
++
+     c2_status_t configFrameScaleMeta(MppFrame frame, std::shared_ptr<C2GraphicBlock> block);
+     c2_status_t configFrameHdrMeta(MppFrame frame, std::shared_ptr<C2GraphicBlock> block);
+ 
+@@ -250,6 +287,29 @@ private:
+         return nullptr;
+     }
+ 
++#if SCULPTOR_ENABLE
++    OutBuffer* findOutBufferBySculptorBuffer(sculptor_buffer sculptorBuffer) {
++        for (int i = 0; i < mOutBuffers.size(); i++) {
++            OutBuffer* buffer = mOutBuffers.editItemAt(i);
++            if (buffer->sculptorBuffer == sculptorBuffer) {
++                return buffer;
++            }
++        }
++        return nullptr;
++    }
++
++    int getOutBufferCountOwnBySculptor() {
++        int count = 0;
++        for (int i = 0; i < mOutBuffers.size(); i++) {
++            OutBuffer *buffer = mOutBuffers.editItemAt(i);
++            if (buffer->mStatus == OutBuffer::OWNED_BY_SCULPTOR) {
++                count++;
++            }
++        }
++        return count;
++    }
++#endif
++
+     void clearOutBuffers() {
+         while (!mOutBuffers.isEmpty()) {
+             OutBuffer *buffer = mOutBuffers.editItemAt(0);
+diff --git a/services/seccomp_policy/android.hardware.media.c2@1.1-arm.policy b/services/seccomp_policy/android.hardware.media.c2@1.1-arm.policy
+index 320b8cf..1f3389e 100644
+--- a/services/seccomp_policy/android.hardware.media.c2@1.1-arm.policy
++++ b/services/seccomp_policy/android.hardware.media.c2@1.1-arm.policy
+@@ -86,3 +86,29 @@ geteuid32: 1
+ getgid32: 1
+ getegid32: 1
+ getgroups32: 1
++
++mkdirat: 1
++eventfd2: 1
++mmap: 1
++getuid: 1
++fstatfs: 1
++mremap: 1
++newfstatat: 1
++fstat: 1
++getrlimit: 1
++wait4: 1
++sched_getparam: 1
++sched_getscheduler: 1
++pthread_getschedparam: 1
++pthread_setschedparam: 1
++sched_get_priority_max: 1
++sched_setscheduler: 1
++sched_setaffinity: 1
++getpriority: 1
++setsockopt: 1
++getsockopt: 1
++getpeername: 1
++getsockname: 1
++sendto: 1
++fsync: 1
++pselect6: 1
+diff --git a/services/seccomp_policy/android.hardware.media.c2@1.1-arm64.policy b/services/seccomp_policy/android.hardware.media.c2@1.1-arm64.policy
+index 03779a9..8acbaf5 100644
+--- a/services/seccomp_policy/android.hardware.media.c2@1.1-arm64.policy
++++ b/services/seccomp_policy/android.hardware.media.c2@1.1-arm64.policy
+@@ -80,3 +80,28 @@ getgid: 1
+ getegid: 1
+ getgroups: 1
+ 
++mkdirat: 1
++eventfd2: 1
++mmap: 1
++getuid: 1
++fstatfs: 1
++mremap: 1
++newfstatat: 1
++fstat: 1
++getrlimit: 1
++wait4: 1
++sched_getparam: 1
++sched_getscheduler: 1
++pthread_getschedparam: 1
++pthread_setschedparam: 1
++sched_get_priority_max: 1
++sched_setscheduler: 1
++sched_setaffinity: 1
++getpriority: 1
++setsockopt: 1
++getsockopt: 1
++getpeername: 1
++getsockname: 1
++sendto: 1
++fsync: 1
++pselect6: 1
+-- 
+2.25.1
+

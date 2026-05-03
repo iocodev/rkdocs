@@ -1,0 +1,58 @@
+From da2e39277c8354f11876de3982a69bb96c8916d5 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Fri, 24 Sep 2021 11:00:36 +0800
+Subject: [PATCH] add EPD_AUTO_DU and EPD_AUTO_DU4 mode
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: Ie8ecc0668c368be8c7166182480b90c5230235cc
+---
+ einkcompositorworker.cpp | 4 ++--
+ einkcompositorworker.h   | 2 ++
+ hwcomposer.cpp           | 2 ++
+ 3 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/einkcompositorworker.cpp b/einkcompositorworker.cpp
+index 1da5477..5a81346 100755
+--- a/einkcompositorworker.cpp
++++ b/einkcompositorworker.cpp
+@@ -503,9 +503,9 @@ int EinkCompositorWorker::Rgba888ToGray16ByRga(int *output_buffer, const buffer_
+ 
+     //A2,DU only support two greys(f,0), DU4 support greys(f,a,5,0), others support 16 greys
+     uint64_t contrast_key =0;
+-    if ((epd_mode == EPD_A2) || (epd_mode == EPD_DU)) {
++    if ((epd_mode == EPD_A2) || (epd_mode == EPD_DU) || (epd_mode == EPD_AUTO_DU)) {
+         contrast_key = 0xffffff0000000000;
+-    } else if (epd_mode == EPD_DU4) {
++    } else if ((epd_mode == EPD_DU4) || (epd_mode == EPD_AUTO_DU4)) {
+         contrast_key = 0xfffffaaa55500000;
+     } else {
+         char value[PROPERTY_VALUE_MAX];
+diff --git a/einkcompositorworker.h b/einkcompositorworker.h
+index 4c06c89..b8fc550 100755
+--- a/einkcompositorworker.h
++++ b/einkcompositorworker.h
+@@ -98,6 +98,8 @@ enum panel_refresh_mode {
+ 	EPD_RESUME		= 19,
+ 	EPD_POWER_OFF	= 20,
+ 	EPD_FORCE_FULL	= 21,
++	EPD_AUTO_DU		= 22,
++	EPD_AUTO_DU4		= 23,
+ };
+ 
+ /*
+diff --git a/hwcomposer.cpp b/hwcomposer.cpp
+index ca9b4b6..e086eb4 100755
+--- a/hwcomposer.cpp
++++ b/hwcomposer.cpp
+@@ -140,6 +140,8 @@ enum panel_refresh_mode {
+     EPD_RESUME            = 19,
+     EPD_POWER_OFF        = 20,
+     EPD_FORCE_FULL       = 21,
++    EPD_AUTO_DU          = 22,
++    EPD_AUTO_DU4           = 23,
+ };
+ 
+ /*
+-- 
+2.17.1
+

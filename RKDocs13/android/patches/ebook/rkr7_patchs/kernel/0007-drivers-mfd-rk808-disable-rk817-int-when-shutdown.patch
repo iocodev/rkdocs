@@ -1,0 +1,38 @@
+From 69f372f725112804e045a8555c0a316a627afb7f Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Sun, 26 Sep 2021 11:13:35 +0800
+Subject: [PATCH 2/2] drivers: mfd: rk808: disable rk817 int when shutdown
+
+rk817 int pin is connect to sleep pin on ebook hardware design,
+cpu unable to pull high sleep pin to shutdown devices,
+when pmic occurs interrupt, so we just disable pmic int
+on shutdown process to avoid this.
+
+TEST:Press the Power button frequently while shutting down ebook devices
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: I2a3a45be371b78720a94b1380fbb101a5597cfc6
+---
+ drivers/mfd/rk808.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/mfd/rk808.c b/drivers/mfd/rk808.c
+index abe91c6b8a1c..803e41edf2b6 100644
+--- a/drivers/mfd/rk808.c
++++ b/drivers/mfd/rk808.c
+@@ -784,10 +784,10 @@ static void rk817_shutdown_prepare(void)
+ 	int ret;
+ 	struct rk808 *rk808 = i2c_get_clientdata(rk808_i2c_client);
+ 
+-	/* close rtc int when power off */
++	/* close rtc/power key int when power off */
+ 	regmap_update_bits(rk808->regmap,
+ 			   RK817_INT_STS_MSK_REG0,
+-			   (0x3 << 5), (0x3 << 5));
++			   0xff, 0xff);
+ 	regmap_update_bits(rk808->regmap,
+ 			   RK817_RTC_INT_REG,
+ 			   (0x3 << 2), (0x0 << 2));
+-- 
+2.17.1
+

@@ -1,0 +1,26 @@
+From d1dad944bcc40238a665e991e16da869cb4137e4 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Sat, 18 Sep 2021 15:57:20 +0800
+Subject: [PATCH] add FALLTHROUGH_INTENDED to fix build err
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: I234bc4742625150d198a4dae7e742d7416fba329
+---
+ einkcompositorworker.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/einkcompositorworker.cpp b/einkcompositorworker.cpp
+index 8043f80..1da5477 100755
+--- a/einkcompositorworker.cpp
++++ b/einkcompositorworker.cpp
+@@ -1169,6 +1169,7 @@ int EinkCompositorWorker::SetEinkMode(EinkComposition *composition) {
+           Y4Commit(composition->einkMode);
+           break;
+       }
++      FALLTHROUGH_INTENDED;
+     default:
+       ConvertToY4Dither(composition->fb_handle, composition->einkMode);
+       Y4Commit(composition->einkMode);
+-- 
+2.17.1
+

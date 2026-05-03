@@ -1,0 +1,28 @@
+From fa3f2073413bd180d3d389cdc558cd6c7cca2136 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Tue, 7 Sep 2021 15:56:51 +0800
+Subject: [PATCH] health: wakeup per 30 minutes when no charging to reduce
+ wakeup times
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: Ic1955189e570611f7e832805761cdd5a3e7f6fa1
+---
+ health/utils/libhealthloop/utils.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/health/utils/libhealthloop/utils.cpp b/health/utils/libhealthloop/utils.cpp
+index cd8c7a9ce..4bc8a5fc5 100644
+--- a/health/utils/libhealthloop/utils.cpp
++++ b/health/utils/libhealthloop/utils.cpp
+@@ -22,7 +22,7 @@ namespace health {
+ // Periodic chores fast interval in seconds
+ #define DEFAULT_PERIODIC_CHORES_INTERVAL_FAST (60 * 1)
+ // Periodic chores fast interval in seconds
+-#define DEFAULT_PERIODIC_CHORES_INTERVAL_SLOW (60 * 10)
++#define DEFAULT_PERIODIC_CHORES_INTERVAL_SLOW (60 * 30)
+ 
+ void InitHealthdConfig(struct healthd_config* healthd_config) {
+     *healthd_config = {
+-- 
+2.17.1
+

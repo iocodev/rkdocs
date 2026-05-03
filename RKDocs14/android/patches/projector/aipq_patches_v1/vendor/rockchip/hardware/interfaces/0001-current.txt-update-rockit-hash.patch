@@ -1,0 +1,27 @@
+From 81d3fdfc3ed2890a81a25f16b81f81be580f5b86 Mon Sep 17 00:00:00 2001
+From: huangjc <huangjc@rock-chips.com>
+Date: Wed, 14 Aug 2024 11:30:08 +0800
+Subject: [PATCH] current.txt: update rockit hash
+
+Signed-off-by: huangjc <huangjc@rock-chips.com>
+Change-Id: Ic524dbb0b7cf24538775bb09d1b5a31b74095d07
+---
+ interfaces/current.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/interfaces/current.txt b/interfaces/current.txt
+index a02870f..c07e67b 100755
+--- a/interfaces/current.txt
++++ b/interfaces/current.txt
+@@ -2,7 +2,7 @@ fc83f14d9b3c8f00df324de2a58f447855fa1ccec78d6c13e956ee7a9451d584 rockchip.hardwa
+ 120d991f1ba85b994a7873021dccb5c88db76cf4d877b17d1cc82ac0c211e89a rockchip.hardware.outputmanager@1.0::IRkOutputManager
+ 
+ # hash for rockit hw
+-bd3f8354d9806f06f5bab5d3321c4883dde5ec4dc265519bc9e9e781f13e5082 rockchip.hardware.rockit.hw@1.0::types
++08da83d71ab8f4c6de750c31ece816078069c1a5492025c2b8e30fef0120abc4 rockchip.hardware.rockit.hw@1.0::types
+ d7ee7fadb16fdf521d533482de1b0d3ae25e4eec5cf765a35ddda1721a5134b3 rockchip.hardware.rockit.hw@1.0::IRockitHwInterface
+ 59ce21677e19ce15eb87e2a6f44a49bfbce8d123b050622c40407794a6ccabe1 rockchip.hardware.rockit.hw@1.0::IRockitHwService
+ 
+-- 
+2.25.1
+

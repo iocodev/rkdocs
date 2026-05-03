@@ -1,0 +1,743 @@
+From 437875bb5d4886242fb30573b940ec5a9c1f1ed9 Mon Sep 17 00:00:00 2001
+From: "president.chao" <president.chao@rock-chips.com>
+Date: Fri, 24 Sep 2021 18:12:08 +0800
+Subject: [PATCH 2/2] Eink:Realize the DPI setting in App level and solve some
+ problems of app, such as JingdongYuDu, WangYiXinWen.
+
+Signed-off-by: president.chao <president.chao@rock-chips.com>
+Change-Id: I31806417cdfd10a124e2be56973f4cb34c7f6e37
+---
+ core/java/android/app/Activity.java           |  46 +++--
+ .../app/ApplicationPackageManager.java        |  36 ++++
+ core/java/android/app/ResourcesManager.java   |  19 ++
+ core/java/android/content/ContextWrapper.java |  27 +--
+ .../android/content/pm/IPackageManager.aidl   |   8 +
+ .../android/content/pm/PackageManager.java    |  21 +++
+ .../android/content/res/ResourcesImpl.java    |  27 +++
+ .../systemui/statusbar/phone/EinkDialog.java  |  25 ++-
+ .../statusbar/phone/EinkSettingsProvider.java |   7 +
+ .../server/pm/PackageManagerService.java      | 167 ++++++++++++++++++
+ .../server/wm/RootWindowContainer.java        |   2 +-
+ .../android/test/mock/MockPackageManager.java |  33 ++++
+ 12 files changed, 367 insertions(+), 51 deletions(-)
+
+diff --git a/core/java/android/app/Activity.java b/core/java/android/app/Activity.java
+index 3e19c30ef057..7dd383c9beec 100644
+--- a/core/java/android/app/Activity.java
++++ b/core/java/android/app/Activity.java
+@@ -104,6 +104,7 @@ import android.text.TextUtils;
+ import android.text.method.TextKeyListener;
+ import android.transition.Scene;
+ import android.transition.TransitionManager;
++import android.util.DisplayMetrics;
+ import android.util.ArrayMap;
+ import android.util.AttributeSet;
+ import android.util.EventLog;
+@@ -969,14 +970,13 @@ public class Activity extends ContextThemeWrapper
+     private boolean mIsInPictureInPictureMode;
+ 
+     private boolean mCanRecreateWithDpi = false;
+-    private int mLastStoreDpi = -1;
+     private MyAppCustomConfigChangeReceiver mAppCustomConfigChangeReceiver = new MyAppCustomConfigChangeReceiver();
+     private class MyAppCustomConfigChangeReceiver extends BroadcastReceiver {
+         @Override
+         public void onReceive(Context context, Intent intent) {
+             String type = intent.getStringExtra("control_type");
+-            Slog.v(TAG, "onReceive onAppBleachConfigChanged " + type);
+-            if("dpi".equals(type)) {
++            Slog.v(TAG, "---zc---onReceive onAppBleachConfigChanged " + type);
++            if ("dpi".equals(type)) {
+                 recreate();
+             } else if ("bleach".equals(type)) {
+                 refreshCurrentView();
+@@ -1262,7 +1262,7 @@ public class Activity extends ContextThemeWrapper
+ 
+     @Override
+     protected void attachBaseContext(Context newBase) {
+-        super.attachBaseContext(updateEinkAppCustomeResources(newBase));
++        super.attachBaseContext(newBase);
+         if (newBase != null) {
+             newBase.setAutofillClient(this);
+             newBase.setContentCaptureOptions(getContentCaptureOptions());
+@@ -1626,12 +1626,6 @@ public class Activity extends ContextThemeWrapper
+         }
+         mRestoredFromBundle = savedInstanceState != null;
+         mCalled = true;
+-
+-        try {
+-            mLastStoreDpi = getCurrentEinkAppCustomeStoreDpi(this, getPackageName());
+-        } catch (Exception e) {
+-            e.printStackTrace();
+-        }
+     }
+ 
+     /**
+@@ -1967,20 +1961,6 @@ public class Activity extends ContextThemeWrapper
+         IntentFilter appCustomConfigFilter = new IntentFilter();
+         appCustomConfigFilter.addAction("com.rockchip.eink.appcustom");
+         registerReceiver(mAppCustomConfigChangeReceiver, appCustomConfigFilter);
+-
+-        try {
+-            if (mCanRecreateWithDpi) {
+-                String packageName = getPackageName();
+-                int storeDpi = getCurrentEinkAppCustomeStoreDpi(this, packageName);
+-                if (mLastStoreDpi != storeDpi) {
+-                    Slog.v(TAG, "recreate " + this + " with onresume storeDpi="
+-                        + storeDpi + ", mLastStoreDpi=" + mLastStoreDpi);
+-                    recreate();
+-                }
+-            }
+-        } catch (Exception e) {
+-            e.printStackTrace();
+-        }
+     }
+ 
+     /**
+@@ -8099,6 +8079,24 @@ public class Activity extends ContextThemeWrapper
+         mIsInMultiWindowMode = inMultiWindowMode(windowingMode);
+         mIsInPictureInPictureMode = windowingMode == WINDOWING_MODE_PINNED;
+         restoreHasCurrentPermissionRequest(icicle);
++        String boot_completed = SystemProperties.get("sys.boot_completed");
++        if (boot_completed.equals("1")) {
++            int dpi = -1;
++            Configuration config = getResources().getConfiguration();
++            DisplayMetrics metrics = getResources().getDisplayMetrics();
++            try {
++                if (AppGlobals.getPackageManager() != null) {
++                    AppGlobals.getPackageManager().getAppDpiMap();
++                    dpi = AppGlobals.getPackageManager().getAppDpi(getPackageName());
++                }
++            } catch (RemoteException e) {
++                throw e.rethrowAsRuntimeException();
++            }
++            config.densityDpi = dpi;
++            metrics.densityDpi = dpi;
++            getResources().updateConfiguration(config, metrics, null);
++        }
++
+         if (persistentState != null) {
+             onCreate(icicle, persistentState);
+         } else {
+diff --git a/core/java/android/app/ApplicationPackageManager.java b/core/java/android/app/ApplicationPackageManager.java
+index bcbf7d87f12d..164fbd01399b 100644
+--- a/core/java/android/app/ApplicationPackageManager.java
++++ b/core/java/android/app/ApplicationPackageManager.java
+@@ -3417,4 +3417,40 @@ public class ApplicationPackageManager extends PackageManager {
+             throw e.rethrowAsRuntimeException();
+         }
+     }
++
++    @Override
++    public void setAppDpiToXML(String packageName, int oldDpi, int newDpi) {
++        try {
++            mPM.setAppDpiToXML(packageName, oldDpi, newDpi);
++        } catch (RemoteException e) {
++            throw e.rethrowAsRuntimeException();
++        }
++    }
++
++    @Override
++    public void setAppDpiToMap(String packageName, int dpi) {
++        try {
++            mPM.setAppDpiToMap(packageName, dpi);
++        } catch (RemoteException e) {
++            throw e.rethrowAsRuntimeException();
++        }
++    }
++
++    @Override
++    public Map getAppDpiMap() {
++        try {
++            return mPM.getAppDpiMap();
++        } catch (RemoteException e) {
++            throw e.rethrowAsRuntimeException();
++        }
++    }
++
++    @Override
++    public int getAppDpi(String packageName) {
++        try {
++            return mPM.getAppDpi(packageName);
++        } catch (RemoteException e) {
++            throw e.rethrowAsRuntimeException();
++        }
++    }
+ }
+diff --git a/core/java/android/app/ResourcesManager.java b/core/java/android/app/ResourcesManager.java
+index 273336d8189a..27b483eb0acd 100644
+--- a/core/java/android/app/ResourcesManager.java
++++ b/core/java/android/app/ResourcesManager.java
+@@ -34,9 +34,12 @@ import android.content.res.ResourcesImpl;
+ import android.content.res.ResourcesKey;
+ import android.content.res.loader.ResourcesLoader;
+ import android.hardware.display.DisplayManagerGlobal;
++import android.os.Binder;
+ import android.os.IBinder;
+ import android.os.Process;
++import android.os.RemoteException;
+ import android.os.Trace;
++import android.app.AppGlobals;
+ import android.util.ArrayMap;
+ import android.util.DisplayMetrics;
+ import android.util.Log;
+@@ -550,6 +553,22 @@ public class ResourcesManager {
+         return impl;
+     }
+ 
++    public static String getPackageName() {
++        try {
++            if (AppGlobals.getPackageManager() != null) {
++                String[] packageNames = AppGlobals.getPackageManager().getPackagesForUid(Binder.getCallingUid());
++                if(packageNames != null && packageNames.length > 0 && !packageNames[0].equals("")) {
++                    return packageNames[0];
++                } else {
++                    return null;
++                }
++            }
++        } catch (RemoteException e) {
++            Log.i(TAG, "remoteException " + e.getMessage());
++        }
++        return null;
++    }
++
+     /**
+      * Finds a cached ResourcesImpl object that matches the given ResourcesKey.
+      *
+diff --git a/core/java/android/content/ContextWrapper.java b/core/java/android/content/ContextWrapper.java
+index 756b44ab6b8b..f45fd4a69d6b 100644
+--- a/core/java/android/content/ContextWrapper.java
++++ b/core/java/android/content/ContextWrapper.java
+@@ -93,29 +93,10 @@ public class ContextWrapper extends Context {
+             return -1;
+         }
+         int densityDpi = SystemProperties.getInt("ro.sf.lcd_density", -1);
+-        Uri URI_EINK_SETTINGS = Uri.parse("content://com.android.systemui.eink/einksettings");
+-        Cursor cursor = null;
+-        try {
+-            cursor = context.getContentResolver().query(URI_EINK_SETTINGS,
+-                null, "package_name = ?", new String[]{packageName}, null);
+-            if(null != cursor) {
+-                if(cursor.getCount() > 0) {
+-                    if(cursor.moveToFirst()) {
+-                        int isDpiSetting = cursor.getInt(cursor.getColumnIndex("is_dpi_setting"));
+-                        if (isDpiSetting == 1) {
+-                            int densityDpiFromDB = cursor.getInt(cursor.getColumnIndex("app_dpi"));
+-                            densityDpi = densityDpiFromDB == -1 ? densityDpi : densityDpiFromDB;
+-                        } else {
+-                            densityDpi = -1;
+-                        }
+-                    }
+-                }
+-            }
+-        } catch (Exception e) {
+-        } finally {
+-            if (null != cursor) {
+-                cursor.close();
+-            }
++        if(context != null) {
++            densityDpi = context.getPackageManager().getAppDpi(packageName);
++        } else {
++            densityDpi = -1;
+         }
+         return densityDpi;
+     }
+diff --git a/core/java/android/content/pm/IPackageManager.aidl b/core/java/android/content/pm/IPackageManager.aidl
+index 0aa6652dc3f2..5b5d3c44e464 100644
+--- a/core/java/android/content/pm/IPackageManager.aidl
++++ b/core/java/android/content/pm/IPackageManager.aidl
+@@ -789,4 +789,12 @@ interface IPackageManager {
+     boolean isAutoRevokeWhitelisted(String packageName);
+ 
+     void grantImplicitAccess(int queryingUid, String visibleAuthority);
++
++    void setAppDpiToXML(String packageName, int oldDpi, int newDpi);
++
++    void setAppDpiToMap(String packageName, int dpi);
++
++    Map getAppDpiMap();
++
++    int getAppDpi(String packageName);
+ }
+diff --git a/core/java/android/content/pm/PackageManager.java b/core/java/android/content/pm/PackageManager.java
+index 52667fbdd904..7591bc121a29 100644
+--- a/core/java/android/content/pm/PackageManager.java
++++ b/core/java/android/content/pm/PackageManager.java
+@@ -86,6 +86,7 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Objects;
+ import java.util.Set;
++import java.util.Map;
+ 
+ /**
+  * Class for retrieving various kinds of information related to the application
+@@ -8061,6 +8062,26 @@ public abstract class PackageManager {
+         }
+     }
+ 
++    /**
++     * @hide
++     */
++    public abstract void setAppDpiToXML(String packageName, int oldDpi, int newDpi);
++
++    /**
++     * @hide
++     */
++    public abstract void setAppDpiToMap(String packageName, int dpi);
++
++    /**
++     * @hide
++     */
++    public abstract Map getAppDpiMap();
++
++    /**
++     * @hide
++     */
++    public abstract int getAppDpi(String packageName);
++
+     // Some of the flags don't affect the query result, but let's be conservative and cache
+     // each combination of flags separately.
+ 
+diff --git a/core/java/android/content/res/ResourcesImpl.java b/core/java/android/content/res/ResourcesImpl.java
+index f40d60dbde5a..e1eadf0e9ecd 100644
+--- a/core/java/android/content/res/ResourcesImpl.java
++++ b/core/java/android/content/res/ResourcesImpl.java
+@@ -41,6 +41,7 @@ import android.graphics.drawable.ColorStateListDrawable;
+ import android.graphics.drawable.Drawable;
+ import android.graphics.drawable.DrawableContainer;
+ import android.icu.text.PluralRules;
++import android.os.RemoteException;
+ import android.os.Build;
+ import android.os.LocaleList;
+ import android.os.SystemClock;
+@@ -54,6 +55,8 @@ import android.util.Slog;
+ import android.util.TypedValue;
+ import android.util.Xml;
+ import android.view.DisplayAdjustments;
++import android.app.ResourcesManager;
++import android.app.AppGlobals;
+ 
+ import com.android.internal.util.GrowingArrayUtils;
+ 
+@@ -64,6 +67,8 @@ import java.io.IOException;
+ import java.io.InputStream;
+ import java.util.Arrays;
+ import java.util.Locale;
++import java.util.Properties;
++import java.lang.reflect.Method;
+ 
+ /**
+  * The implementation of Resource access. This class contains the AssetManager and all caches
+@@ -373,6 +378,11 @@ public class ResourcesImpl {
+ 
+     public void updateConfiguration(Configuration config, DisplayMetrics metrics,
+                                     CompatibilityInfo compat) {
++        if (config != null && config.densityDpi < 0) {
++            if (DEBUG_CONFIG) Slog.d(TAG, "---zc---config.densityDpi:" + config.densityDpi);
++            config.densityDpi = 0;
++            metrics.densityDpi = 0;
++        }
+         Trace.traceBegin(Trace.TRACE_TAG_RESOURCES, "ResourcesImpl#updateConfiguration");
+         try {
+             synchronized (mAccessLock) {
+@@ -478,6 +488,22 @@ public class ResourcesImpl {
+                             + mConfiguration + " final compat is "
+                             + mDisplayAdjustments.getCompatibilityInfo());
+                 }
++                String boot_completed = SystemProperties.get("sys.boot_completed");
++                if (boot_completed.equals("1") && config != null && config.densityDpi == 0) {
++                    int dpi = -1;
++                    try {
++                        if (AppGlobals.getPackageManager() != null) {
++                            dpi = AppGlobals.getPackageManager().getAppDpi(ResourcesManager.getPackageName());
++                            if (DEBUG_CONFIG) Slog.d(TAG, "---zc---dpi:" + dpi);
++                        }
++                    } catch (RemoteException e) {
++                        throw e.rethrowAsRuntimeException();
++                    }
++                    if (dpi > 0) {
++                        mMetrics.densityDpi = dpi;
++                        mConfiguration.densityDpi = dpi;
++                    }
++                }
+ 
+                 mDrawableCache.onConfigurationChange(configChanges);
+                 mColorDrawableCache.onConfigurationChange(configChanges);
+@@ -495,6 +521,7 @@ public class ResourcesImpl {
+         } finally {
+             Trace.traceEnd(Trace.TRACE_TAG_RESOURCES);
+         }
++        if (DEBUG_CONFIG) Slog.d(TAG, "---zc---updateConfiguration mConfiguration.densityDpi=" + mConfiguration.densityDpi);
+     }
+ 
+     /**
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkDialog.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkDialog.java
+index 47a0e045aba5..e7270d950196 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkDialog.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkDialog.java
+@@ -3,6 +3,7 @@ package com.android.systemui.statusbar.phone;
+ import android.app.Activity;
+ import android.content.ContentValues;
+ import android.content.Context;
++import android.content.pm.PackageManager;
+ import android.os.Bundle;
+ import android.os.Handler;
+ import android.os.Message;
+@@ -41,7 +42,9 @@ public class EinkDialog extends EinkBaseDialog implements View.OnClickListener,
+     private static final int SET_CONTRAST_SEEKBAR = 4;
+     private EinkRefreshDialog mEinkRefreshDialog;
+     private EinkSettingsManager mEinkSettingsManager;
++    private PackageManager mPackageManager;
+     private EinkAppBleachDialog mEinkAppBleachDialog;
++    private int mLastDpi;
+ 
+     public Handler EinkDialogHandler=new Handler() {
+         @Override
+@@ -96,6 +99,9 @@ public class EinkDialog extends EinkBaseDialog implements View.OnClickListener,
+         if(mEinkSettingsManager == null) {
+             mEinkSettingsManager = new EinkSettingsManager(mContext);
+         }
++        if (mPackageManager == null) {
++            mPackageManager = mContext.getPackageManager();
++        }
+         //DPI设置
+         mDpiText = (TextView) findViewById(R.id.eink_dialog_dpi_edit);
+         mDpiText.setText(String.valueOf(EinkSettingsProvider.DPI));
+@@ -171,7 +177,12 @@ public class EinkDialog extends EinkBaseDialog implements View.OnClickListener,
+ 
+     @Override
+     public void onStartTrackingTouch(SeekBar seekBar) {
+-
++        int id = seekBar.getId();
++        if(id == R.id.eink_dialog_dpi_seekbar) {
++            if(EinkSettingsProvider.isDpiSetting) {
++                mLastDpi = seekBar.getProgress() + EinkSettingsProvider.INIT_PROGRASS_DPI;
++            }
++        }
+     }
+ 
+     @Override
+@@ -185,8 +196,12 @@ public class EinkDialog extends EinkBaseDialog implements View.OnClickListener,
+                 mContext.getContentResolver().update(EinkSettingsProvider.URI_EINK_SETTINGS,
+                         values, EinkSettingsDataBaseHelper.PACKAGE_NAME + " = ?",
+                         new String[]{EinkSettingsProvider.packageName});
+-                //设置dpi
++                //设置dpi到map
++                mPackageManager.setAppDpiToMap(EinkSettingsProvider.packageName, EinkSettingsProvider.DPI);
++                //通知Activity
+                 mEinkSettingsManager.setAppDPI(mContext);
++                //设置dpi到xml文件
++                mPackageManager.setAppDpiToXML(EinkSettingsProvider.packageName, mLastDpi, EinkSettingsProvider.DPI);
+             }
+         } else if(id == R.id.eink_dialog_animation_seekbar) {
+         } else if(id == R.id.eink_dialog_contrast_seekbar) {
+@@ -257,7 +272,11 @@ public class EinkDialog extends EinkBaseDialog implements View.OnClickListener,
+                     values, EinkSettingsDataBaseHelper.PACKAGE_NAME + " = ?",
+                     new String[]{EinkSettingsProvider.packageName});
+             //修改APP DPI
+-            mEinkSettingsManager.setAppDPI(mContext);
++            if (isChecked)
++                mPackageManager.setAppDpiToMap(EinkSettingsProvider.packageName, EinkSettingsProvider.DPI);
++            else
++                mPackageManager.setAppDpiToMap(EinkSettingsProvider.packageName, -1);
++            mEinkSettingsManager.setAppDPI(mContext);    
+             Message setDPISeekbarMessage = new Message();
+             setDPISeekbarMessage.what = SET_DPI_SEEKBAR;
+             EinkDialogHandler.sendMessage(setDPISeekbarMessage);
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkSettingsProvider.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkSettingsProvider.java
+index ad01741c8e87..85fb2aeaba95 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkSettingsProvider.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/EinkSettingsProvider.java
+@@ -4,6 +4,7 @@ import android.content.ContentProvider;
+ import android.content.ContentResolver;
+ import android.content.ContentValues;
+ import android.content.Context;
++import android.content.pm.PackageManager;
+ import android.content.Intent;
+ import android.content.UriMatcher;
+ import android.database.Cursor;
+@@ -56,6 +57,7 @@ public class EinkSettingsProvider extends ContentProvider {
+     private EinkSettingsDataBaseHelper mEinkSettingsDataBaseHelper;
+     private SQLiteDatabase mDB;
+     private EinkSettingsManager mEinkSettingsManager;
++    private PackageManager mPackageManager;
+     static {
+         mUriMatcher = new UriMatcher((UriMatcher.NO_MATCH));
+         mUriMatcher.addURI(AUTHORITY, "einksettings", EINKSETTINGS);
+@@ -81,6 +83,9 @@ public class EinkSettingsProvider extends ContentProvider {
+         if(mEinkSettingsManager == null) {
+             mEinkSettingsManager = new EinkSettingsManager(getContext());
+         }
++        if (mPackageManager == null) {
++            mPackageManager = getContext().getPackageManager();
++        }
+         return true;
+     }
+ 
+@@ -156,6 +161,8 @@ public class EinkSettingsProvider extends ContentProvider {
+                         mAppBleachCoverColor = 0;
+                         mAppBleachBgColor = 0;
+                     }
++                    if(!isDpiSetting)
++                        mPackageManager.setAppDpiToMap(packageName, -1);
+                     if(isContrastSetting) {
+                         //对比度数值为0时，使用0xfedcba9876543210
+                         if(contrast == 0) {
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index 2ec688a0d3eb..8c93b7cc41de 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -405,8 +405,10 @@ import java.io.FileDescriptor;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.FileWriter;
++import java.io.InputStream;
+ import java.io.IOException;
+ import java.io.PrintWriter;
++import java.io.RandomAccessFile;
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.nio.charset.StandardCharsets;
+@@ -502,6 +504,7 @@ public class PackageManagerService extends IPackageManager.Stub
+     static final boolean DEBUG_ABI_SELECTION = false;
+     private static final boolean DEBUG_INSTANT = Build.IS_DEBUGGABLE;
+     private static final boolean DEBUG_APP_DATA = false;
++    private static final boolean DEBUG_DPI = false;
+ 
+     /** REMOVE. According to Svet, this was only used to reset permissions during development. */
+     static final boolean CLEAR_RUNTIME_PERMISSIONS_ON_UPGRADE = false;
+@@ -25842,6 +25845,170 @@ public class PackageManagerService extends IPackageManager.Stub
+ 
+         mPmInternal.writeSettings(false);
+     }
++    private Map<String, Integer> mAppDpiMap;
++    private static String DATA_APP_DPI_CONFIG = "/data/system/package_app_dpi_config.xml";
++
++    /**
++     * @hide
++     */
++    public void setAppDpiToXML(String packageName, int oldDpi, int newDpi) {
++        RandomAccessFile randomAccessFile = null;
++        try {
++            File configFilter = new File(DATA_APP_DPI_CONFIG);
++            randomAccessFile = new RandomAccessFile(configFilter, "rw");
++            String line = null;
++            long lastPoint = 0;
++            StringBuilder totalStr = new StringBuilder();
++            while ((line = randomAccessFile.readLine()) != null) {
++                if (DEBUG_DPI) Slog.d(TAG, "---zc---line:" + line);
++                long point = randomAccessFile.getFilePointer();
++                if (line.contains(packageName)) {
++                    String str = line.replace(String.format("dpi=\"%d\"", oldDpi), String.format("dpi=\"%d\"", newDpi));
++                    if (DEBUG_DPI) Slog.d(TAG, "---zc---str:" + str);
++                    randomAccessFile.seek(lastPoint);
++                    randomAccessFile.writeBytes(str);
++                    totalStr.append(str);
++                    lastPoint = point;
++                    continue;  
++                }
++                lastPoint = point;
++                totalStr.append(line);
++            }
++            if (!totalStr.toString().contains(packageName)) {
++                randomAccessFile.seek(lastPoint - 26);
++                randomAccessFile.writeBytes(String.format("    <app packageName=\"%s\" dpi=\"%d\"/>\n</package-app-dpi-config>\n", packageName, newDpi));
++            }
++        } catch (Exception e) {
++            e.printStackTrace();
++        } finally {
++            try {
++                if (randomAccessFile != null) {
++                    randomAccessFile.close();
++                }
++            } catch (IOException e) {
++                e.printStackTrace();
++            }
++        }
++    }
++
++    /**
++     * @hide
++     */
++    public void setAppDpiToMap(String packageName, int dpi) {
++        if (DEBUG_DPI) Slog.d(TAG, "---zc--setAppDpiToMap packageName:" + packageName + ",dpi:" + dpi);
++        if(packageName != null && !packageName.equals(""))
++            mAppDpiMap.put(packageName, dpi);
++    }
++
++    /**
++     * @hide
++     */
++    public Map getAppDpiMap() {
++        if (DEBUG_DPI) Slog.d(TAG, "---zc--getAppDpiMap");
++        if (null == mAppDpiMap) {
++            if (DEBUG_DPI) Slog.d(TAG, "---zc--null == mAppDpiMap");
++            mAppDpiMap = new HashMap<String, Integer>();
++            File configFilter = new File(DATA_APP_DPI_CONFIG);
++            if (configFilter.exists()) {
++                if (DEBUG_DPI) Slog.d(TAG, "configFilter.exists()");
++                FileInputStream stream = null;
++                try {
++                    stream = new FileInputStream(configFilter);
++                    XmlPullParser xmlPullParser = Xml.newPullParser();
++                    xmlPullParser.setInput(stream, null);
++                    int type;
++                    do {
++                        type = xmlPullParser.next();
++                        if (type == XmlPullParser.START_TAG) {
++                            String tag = xmlPullParser.getName();
++                            if ("app".equals(tag)) {
++                                String pkgName = xmlPullParser.getAttributeValue(null, "packageName");
++                                String dpi = xmlPullParser.getAttributeValue(null, "dpi");
++                                if (DEBUG_DPI) Slog.d(TAG, "---zc---getConfigMap: pkgName = " + pkgName + ", dpi = " + dpi);
++                                if (!TextUtils.isEmpty(pkgName) && !TextUtils.isEmpty(dpi)) {
++                                    int parseAppDpi = Integer.parseInt(dpi);
++                                    mAppDpiMap.put(pkgName, parseAppDpi >= 0 ? parseAppDpi : -1);
++                                }
++                            } else {
++                                if (DEBUG_DPI) Slog.d(TAG, "---zc---getConfigMap: tag != app");
++                            }
++                        }
++                    } while (type != XmlPullParser.END_DOCUMENT);
++                } catch (NullPointerException e) {
++                    Slog.w(TAG, "failed parsing " + configFilter, e);
++                } catch (NumberFormatException e) {
++                    Slog.w(TAG, "failed parsing " + configFilter, e);
++                } catch (XmlPullParserException e) {
++                    Slog.w(TAG, "failed parsing " + configFilter, e);
++                } catch (IndexOutOfBoundsException e) {
++                    Slog.w(TAG, "failed parsing " + configFilter, e);
++                } catch (IOException e) {
++                    Slog.w(TAG, "failed parsing " + configFilter, e);
++                } finally {
++                    try {
++                        if (stream != null) {
++                            stream.close();
++                        }
++                    } catch (IOException e) {
++                        Slog.w(TAG, "stream.close failed");
++                    }
++                }
++            } else {
++                if (DEBUG_DPI) Slog.w(TAG, "---zc---package_app_dpi_config.xml is not exists");
++                RandomAccessFile randomAccessFile = null;
++                try {
++                    randomAccessFile = new RandomAccessFile(configFilter, "rw");
++                    randomAccessFile.writeBytes("<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n" +
++                        "<package-app-dpi-config>\n" + "</package-app-dpi-config>\n");
++                } catch (Exception e) {
++                    e.printStackTrace();
++                } finally {
++                    try {
++                        if (randomAccessFile != null) {
++                            randomAccessFile.close();
++                        }
++                    } catch (IOException e) {
++                        e.printStackTrace();
++                    }
++                }
++            }
++        } else {
++            if (DEBUG_DPI) Slog.w(TAG, "---zc---mAppDpiMap != null");
++        }
++        if (mAppDpiMap != null && mAppDpiMap.size() > 0) {
++            return mAppDpiMap;
++        }
++        return new HashMap<String, Integer>();
++    }
++
++    /**
++     * @hide
++     */
++    public int getAppDpi(String packageName) {
++        if (DEBUG_DPI) Slog.v(TAG, "---zc---getAppDpi packageName:" + packageName);
++        if (mAppDpiMap != null && mAppDpiMap.size() > 0) {
++            if (!TextUtils.isEmpty(packageName)) {
++                for (String pkgName : mAppDpiMap.keySet()) {
++                    if (!TextUtils.isEmpty(pkgName) && packageName.equals(pkgName)) {
++                        Integer dpi = mAppDpiMap.get(packageName);
++                        if (dpi != null) {
++                            if (DEBUG_DPI) Slog.d(TAG, "---zc---dpi for app package = " + packageName + " , dpi = " + dpi.toString());
++                            return dpi;
++                        } else {
++                            continue;
++                        }
++                    } else {
++                        continue;
++                    }
++                }
++            }
++        } else {
++            if (DEBUG_DPI) Slog.v(TAG, "---zc---mAppDpiMap ==null || mAppDpiMap.size() <= 0");
++            return -1;
++        }
++        return -1;
++    }
++
+ 
+     @Override
+     public void setMimeGroup(String packageName, String mimeGroup, List<String> mimeTypes) {
+diff --git a/services/core/java/com/android/server/wm/RootWindowContainer.java b/services/core/java/com/android/server/wm/RootWindowContainer.java
+index f0e38109cf7e..1d41574f7e80 100644
+--- a/services/core/java/com/android/server/wm/RootWindowContainer.java
++++ b/services/core/java/com/android/server/wm/RootWindowContainer.java
+@@ -3344,7 +3344,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
+                     }
+                     if(null != cursor) {
+                         if(cursor.getCount() > 0) {
+-                            Log.v(TAG, "EINK++ cursor.getCount() > 0");
++                            //Log.v(TAG, "EINK++ cursor.getCount() > 0");
+                         } else {
+                             ContentValues values = new ContentValues();
+                             values.put("package_name", r.packageName);
+diff --git a/test-mock/src/android/test/mock/MockPackageManager.java b/test-mock/src/android/test/mock/MockPackageManager.java
+index ddc20fb48f8f..e80b15614c29 100644
+--- a/test-mock/src/android/test/mock/MockPackageManager.java
++++ b/test-mock/src/android/test/mock/MockPackageManager.java
+@@ -55,6 +55,7 @@ import android.os.PersistableBundle;
+ import android.os.UserHandle;
+ import android.os.storage.VolumeInfo;
+ 
++import java.util.Map;
+ import java.util.List;
+ import java.util.Set;
+ 
+@@ -1257,4 +1258,36 @@ public class MockPackageManager extends PackageManager {
+     public int getPackagePerformanceMode(String pkgName) {
+         throw new UnsupportedOperationException();
+     }
++
++    /**
++     * @hide
++     */
++    @Override
++    public void setAppDpiToXML(String packageName, int oldDpi, int newDpi) {
++        throw new UnsupportedOperationException();
++    }
++
++    /**
++     * @hide
++     */
++    @Override
++    public void setAppDpiToMap(String packageName, int dpi) {
++        throw new UnsupportedOperationException();
++    }
++
++    /**
++     * @hide
++     */
++    @Override
++    public Map getAppDpiMap() {
++        throw new UnsupportedOperationException();
++    }
++
++    /**
++     * @hide
++     */
++    @Override
++    public int getAppDpi(String packageName) {
++        throw new UnsupportedOperationException();
++    }
+ }
+-- 
+2.17.1
+

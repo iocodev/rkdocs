@@ -1,0 +1,43 @@
+From 19c21d2fab2d6f8addd0072906057dc8eaab25d1 Mon Sep 17 00:00:00 2001
+From: Dayao Ji <jdy@rock-chips.com>
+Date: Thu, 16 Sep 2021 17:33:12 +0800
+Subject: [PATCH] build: Add upgrading logo
+
+Need to put logo.img under $(TARGET_DEVICE_DIR)/ota/
+
+Signed-off-by: Dayao Ji <jdy@rock-chips.com>
+Change-Id: I14e2eaebcc24f53a0de1c76f8d0cf66924fe5e92
+---
+ core/Makefile | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/core/Makefile b/core/Makefile
+index eb82c5c96a..d0ecf262b6 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -1412,6 +1412,8 @@ else
+ INSTALLED_TRUST_TARGET := $(strip $(wildcard u-boot/trust.img))
+ endif
+ 
++INSTALLED_EBOOK_LOGO_TARGET := $(strip $(wildcard $(TARGET_DEVICE_DIR)/ota/logo.img))
++
+ .PHONY: notice_files
+ 
+ # Create the rule to combine the files into text and html/xml forms
+@@ -4814,6 +4816,13 @@ ifeq (1,$(strip $(shell expr $(BOARD_BOOT_HEADER_VERSION) \>= 3)))
+ endif
+ endif
+ 
++ifeq ($(INSTALLED_EBOOK_LOGO_TARGET),)
++	$(info No logo.img to otapackage)
++else
++	$(hide) mkdir -p $(zip_root)/IMAGES
++	$(hide) cp $(INSTALLED_EBOOK_LOGO_TARGET) $(zip_root)/IMAGES/logo.img
++endif
++
+ ifneq ($(PRODUCT_SYSTEM_BASE_FS_PATH),)
+ 	$(hide) cp $(PRODUCT_SYSTEM_BASE_FS_PATH) \
+ 	  $(zip_root)/META/$(notdir $(PRODUCT_SYSTEM_BASE_FS_PATH))
+-- 
+2.17.1
+

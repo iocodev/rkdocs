@@ -1,0 +1,30 @@
+From 09751fa900989d309eb94064afca968cc02857e8 Mon Sep 17 00:00:00 2001
+From: Dayao Ji <jdy@rock-chips.com>
+Date: Thu, 23 Sep 2021 14:38:56 +0800
+Subject: [PATCH 2/2] A/B: support logo for ebook
+
+Signed-off-by: Dayao Ji <jdy@rock-chips.com>
+Change-Id: I3fd92bceea4739ff5e45a67e1225d691505023e9
+---
+ device.mk | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/device.mk b/device.mk
+index 5d97bd05..df160a07 100644
+--- a/device.mk
++++ b/device.mk
+@@ -1285,6 +1285,11 @@ AB_OTA_PARTITIONS += \
+     vendor_boot
+ endif
+ 
++ifeq ($(strip $(BUILD_WITH_RK_EBOOK)),true)
++AB_OTA_PARTITIONS += \
++    logo
++endif
++
+ # A/B OTA dexopt package
+ PRODUCT_PACKAGES += otapreopt_script
+ 
+-- 
+2.17.1
+

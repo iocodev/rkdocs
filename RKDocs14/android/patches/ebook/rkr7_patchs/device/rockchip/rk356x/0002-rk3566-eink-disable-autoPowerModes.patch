@@ -1,0 +1,69 @@
+From 81acb715e0b4d35be924c9948f639364a3d15718 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Tue, 7 Sep 2021 10:42:41 +0800
+Subject: [PATCH] rk3566 eink: disable autoPowerModes
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: I0cd8d30271df5cd223d807cb04ad5e81a30bf947
+---
+ .../overlay/frameworks/base/core/res/res/values/config.xml      | 2 +-
+ rk3566_eink/rk3566_eink.mk                                      | 2 +-
+ .../overlay/frameworks/base/core/res/res/values/config.xml      | 2 +-
+ rk3566_einkw6/rk3566_einkw6.mk                                  | 2 +-
+ 4 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/rk3566_eink/overlay/frameworks/base/core/res/res/values/config.xml b/rk3566_eink/overlay/frameworks/base/core/res/res/values/config.xml
+index 7672ad0..71eec98 100755
+--- a/rk3566_eink/overlay/frameworks/base/core/res/res/values/config.xml
++++ b/rk3566_eink/overlay/frameworks/base/core/res/res/values/config.xml
+@@ -136,7 +136,7 @@
+          dozing).  This should be enabled if you have such services and expect apps to
+          correctly use them when installed on your device.  Otherwise, keep this disabled
+          so that applications can still use their own mechanisms. -->
+-    <bool name="config_enableAutoPowerModes">true</bool>
++    <bool name="config_enableAutoPowerModes">false</bool>
+ 
+     <!-- Boolean indicating whether or not wifi firmware debugging is enabled -->
+     <bool translatable="false" name="config_wifi_enable_wifi_firmware_debugging">false</bool>
+diff --git a/rk3566_eink/rk3566_eink.mk b/rk3566_eink/rk3566_eink.mk
+index 5c1f249..4f5e34e 100644
+--- a/rk3566_eink/rk3566_eink.mk
++++ b/rk3566_eink/rk3566_eink.mk
+@@ -34,7 +34,7 @@ $(call inherit-product, frameworks/native/build/tablet-10in-xhdpi-2048-dalvik-he
+ BOARD_PLAT_PRIVATE_SEPOLICY_DIR += device/rockchip/rk356x/sepolicy_ebook_system
+ BOARD_SEPOLICY_DIRS += device/rockchip/rk356x/sepolicy_ebook
+ 
+-DEVICE_PACKAGE_OVERLAYS := device/rockchip/common/overlay $(LOCAL_PATH)/overlay
++DEVICE_PACKAGE_OVERLAYS := $(LOCAL_PATH)/overlay device/rockchip/common/overlay
+ 
+ PRODUCT_CHARACTERISTICS := tablet
+ 
+diff --git a/rk3566_einkw6/overlay/frameworks/base/core/res/res/values/config.xml b/rk3566_einkw6/overlay/frameworks/base/core/res/res/values/config.xml
+index 7b79727..b9a47d0 100755
+--- a/rk3566_einkw6/overlay/frameworks/base/core/res/res/values/config.xml
++++ b/rk3566_einkw6/overlay/frameworks/base/core/res/res/values/config.xml
+@@ -136,7 +136,7 @@
+          dozing).  This should be enabled if you have such services and expect apps to
+          correctly use them when installed on your device.  Otherwise, keep this disabled
+          so that applications can still use their own mechanisms. -->
+-    <bool name="config_enableAutoPowerModes">true</bool>
++    <bool name="config_enableAutoPowerModes">false</bool>
+ 
+     <!-- Boolean indicating whether or not wifi firmware debugging is enabled -->
+     <bool translatable="false" name="config_wifi_enable_wifi_firmware_debugging">false</bool>
+diff --git a/rk3566_einkw6/rk3566_einkw6.mk b/rk3566_einkw6/rk3566_einkw6.mk
+index bcfdc8d..6103aae 100644
+--- a/rk3566_einkw6/rk3566_einkw6.mk
++++ b/rk3566_einkw6/rk3566_einkw6.mk
+@@ -34,7 +34,7 @@ $(call inherit-product, frameworks/native/build/tablet-10in-xhdpi-2048-dalvik-he
+ BOARD_PLAT_PRIVATE_SEPOLICY_DIR += device/rockchip/rk356x/sepolicy_ebook_system
+ BOARD_SEPOLICY_DIRS += device/rockchip/rk356x/sepolicy_ebook
+ 
+-DEVICE_PACKAGE_OVERLAYS := device/rockchip/common/overlay $(LOCAL_PATH)/overlay
++DEVICE_PACKAGE_OVERLAYS := $(LOCAL_PATH)/overlay device/rockchip/common/overlay
+ 
+ PRODUCT_CHARACTERISTICS := tablet
+ 
+-- 
+2.17.1
+

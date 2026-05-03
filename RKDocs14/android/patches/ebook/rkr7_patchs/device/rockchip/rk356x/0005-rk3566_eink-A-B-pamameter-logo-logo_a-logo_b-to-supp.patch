@@ -1,0 +1,83 @@
+From 9bee6e7f9295eb6b4f60c2538b3b1c31d8e80b3f Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Thu, 23 Sep 2021 16:12:32 +0800
+Subject: [PATCH] rk3566_eink: A/B pamameter: logo -> logo_a && logo_b to
+ support logo ota update
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: I5fb1568a7739e1af8139140787ff02c1ef4be86a
+---
+ rk3566_eink/config.cfg_ab      | Bin 8569 -> 9179 bytes
+ rk3566_eink/parameter_ab.txt   |   2 +-
+ rk3566_einkw6/parameter_ab.txt |   2 +-
+ 3 files changed, 2 insertions(+), 2 deletions(-)
+ mode change 100644 => 100755 rk3566_eink/config.cfg_ab
+
+diff --git a/rk3566_eink/config.cfg_ab b/rk3566_eink/config.cfg_ab
+old mode 100644
+new mode 100755
+index e814ad076f7452ee87540cdb3e8568b96ed940e9..756c99a1b1296c5bc4574418d6c151a5d511eb7f
+GIT binary patch
+literal 9179
+zcmeI1Jxmlq6vrP6gisi<Q45J0txS#_qJ|Ko3koL@$OR&P0J&rN7S2OH7A#DN(P(LZ
+zoSlsr5@RJXN?{_639+^_Mg@!)V`<d?o4L7N!~$+N(bbvF?99B`oqap=yZ7GCooa|s
+zIlU_>r6SrzWvJKCP1;^gM3!M0O_Zc=>ZLv!gM`yT<N{HXr%@C?vguhz%KjWn*{XYK
+z$2Czci_?shHDLHoYQ?BMG>kk*Lo`Y;IuB_d>Q^A`#1k!?8!3U>0OTP&eVD4~C>_HQ
+zb6wdi?inJtp0zZBqXJ{_ct|s|L{o=$mJ;W9$qBdm)VrD#sy$pxi}Fq((bttEeXC2^
+z%kL}1wQmb+4DRGcF=`PrW%F2^R9TGrLcwD)QLc5R>?e)$6uy3WipNm*ah?0RTz!21
+zEwmq<nHS@Sq0jD<DZ4h?HnVM|%MJ9g4m_u`FZ;!N@pJIl+`6dwHrJALciXIee}CNm
+zjx`#=SgW6;?mPx3)|qv9HMj7F$6-0Qqqz40bnVDkb*jy4%lfBVoOk2CJqPBf=u46^
+z$J64SdE6Ix*2k;&L|^oEnx5{P6LXh={I<}Rud<9N)_4p#fmNMAmYlhlXlsOB5`?*V
+z2~j1Ekc%4T*#;dwC_C}Q^)#|X(KapmRck$aqZ>4jL1KZt37SS$NfY*G37f>4Bymi@
+za&%)+G-29?`C`LN`3tuUH({0!gpsyk+Do#Rj4Q%8&KZZlBG@oL2)nom!WyZWYAHhX
+z@PVy#))jx%BQ|S+Bu3|`4gIZj8s|E+B9OVS4ME<Hp2P6JO%$agbOE(?_~S52XPg+W
+z2#Z`P&eiau?6s??T10|MlQy&x*}14dnLvCf6UQN(bR4#&IBZ$Yo@MmHKeC^cKGM6F
+z3^HMAE;M02MEaSHgs}zlPS|F=<lkz;G+{n|OP0y6Ma!^Z!Q^*jcg~JEU&YMa*1jc!
+zY{T4h;n*?lCG*;?2>+fiX~(<}7GxWy3G>m0RV%{Q?^SpwEXX!Y&4pvXINH}XEH4{o
+zZX}H9@=jQgZI~v^M;m4qafpRI{Wh9Jq^0)qy%QE>8#bPs3&)CS8<yw4MoW9MgiT>5
+z-v(j**s&Nx%rBF)aI*d{NBY0My+f9>Bc{D%US4uW(qkDTAZsAEANIcy=IopBj;opr
+jhclifO;}!peRwVqa}&lM(mP>6j>9xzKE`2#i-NG9kF|Zu
+
+literal 8569
+zcmeI1O-vI(7>3_gh@MFGpb|w$@LEy?3^7eCA`oJ+q(uB9wp0)at<=JTF)@LYo;-OZ
+z@oL12cvBL3FoA<4#&|I3)dV~!m-S@S_nYl@SMdPd9$eko%<lZ`&V2pm={vKt?VVky
+z!N=W|sK6mqp&m!@&{tIhAmvZ_qZr2^hA@mAOC%g+^r@6_%JTA~5bh7?+EP;2%<7fB
+zk5n>{#Eenai4zz=oULBP7~^$}B8vphvvip08!R1Qk13wJkzs0t<w5p7h9<P&IFE$w
+z&K~v5DC~B&A<d(KZAg0zGjqW7zWqK(3`DE#=A(Hdrc8U1Ur^V3yMUMLF}!NmwQSh9
+zciz9Oo{>|fA2`saYtohk^IFODW8Y;&cwM}rYk~K(>Cm0}X=%fJPSR4>Y^#&!qs$*%
+zn@y`0Y0vseUE5R02MT%9mUu+h#0K%{+;Xk@UD6M`Esl%n@4%-Rl2u=|Z%<pQzjKVj
+zZ0p5m!**#yg4irJtj<6GAni!G<m>qCZQ2@MT^lm<GPYv><U8xPN!{W4Jl=kZVKck{
+z)0PM9YvblKRoDAw0gH8c<-0t~?<#Ah_msbvW1M5ma8xH54bBYT${ipdJ0a|nBFxT9
+z5RE*7HfnMO{)FqPZIYJVVrK*Gy~W7j5%w1orcnvTc}!9{202(x3A?xr!n)CeHgutb
+zbj5MTrd=J>wX-Zq;2io`AIE8)PchfUGW)$jmiM#f7}<@Y7tOf9R6kh`@oKe`;2j|q
+z8`Zg$+9$*}p;fVMTGGdy<%<TYV}|M~LH@%MJPq5ChDDUqs9}~@6J*UfVekm^W=WYP
+zlO|!Z&Y9qP3Dk&k5awnL%M^TJS1?b*N?eD%HVGTz{3!FJF-JPrFgFus`obfu3@iQ3
+zt%Qk!IVa4`v!q8@8Q&!X#_BcYpQ3^p?~#K=9kbqwg}I%*OS)OZ?7pyc%v<S~v|ADS
+zGhv2~IU&r=8s-sJMh$B<3Hx=g!Z~4X)-cl-mVU{8g{NU9X;@?{VM3R4!rZK39${tF
+zut<e0vA7@B$9=|ZaWCIFVQ$v2iJ~to74tN##NCRO+5%zI+{vFJVb{20k>i@*2!_HL
+z>3?~p|NF1E$ny5|&2O$H5;kMdlk%rY)(9j1OTw)0SMt@!^o7Nlc*$Fbm9!39Us8zu
+E1Tes?wEzGB
+
+diff --git a/rk3566_eink/parameter_ab.txt b/rk3566_eink/parameter_ab.txt
+index 2dda810..71b6e61 100755
+--- a/rk3566_eink/parameter_ab.txt
++++ b/rk3566_eink/parameter_ab.txt
+@@ -8,4 +8,4 @@ MACHINE: rk3566_eink
+ CHECK_MASK: 0x80
+ PWR_HLD: 0,0,A,0,1
+ TYPE: GPT
+-CMDLINE:mtdparts=rk29xxnand:0x00002000@0x00002000(security),0x00002000@0x00004000(uboot_a),0x00002000@0x00006000(uboot_b),0x00001000@0x00008000(waveform),0x00002000@0x00009000(trust_a),0x00002000@0x0000b000(trust_b),0x00002000@0x0000d000(misc),0x00002000@0x0000f000(dtbo_a),0x00002000@0x00011000(dtbo_b),0x00000800@0x00013000(vbmeta_a),0x00000800@0x00013800(vbmeta_b),0x00030000@0x00014000(boot_a),0x00030000@0x00044000(boot_b),0x000c0000@0x00074000(backup),0x000c0000@0x00134000(cache),0x00008000@0x001f4000(metadata),0x00000800@0x001fc000(baseparameter),0x00a02000@0x001fc800(super),0x008000@0x00bfe800(logo),-@0x00c06800(userdata:grow)
++CMDLINE:mtdparts=rk29xxnand:0x00002000@0x00002000(security),0x00002000@0x00004000(uboot_a),0x00002000@0x00006000(uboot_b),0x00001000@0x00008000(waveform),0x00002000@0x00009000(trust_a),0x00002000@0x0000b000(trust_b),0x00002000@0x0000d000(misc),0x00002000@0x0000f000(dtbo_a),0x00002000@0x00011000(dtbo_b),0x00000800@0x00013000(vbmeta_a),0x00000800@0x00013800(vbmeta_b),0x00030000@0x00014000(boot_a),0x00030000@0x00044000(boot_b),0x000c0000@0x00074000(backup),0x000c0000@0x00134000(cache),0x00008000@0x001f4000(metadata),0x00000800@0x001fc000(baseparameter),0x00a02000@0x001fc800(super),0x008000@0x00bfe800(logo_a),0x008000@0x00c06800(logo_b),-@0x00c0e800(userdata:grow)
+diff --git a/rk3566_einkw6/parameter_ab.txt b/rk3566_einkw6/parameter_ab.txt
+index 2dda810..71b6e61 100755
+--- a/rk3566_einkw6/parameter_ab.txt
++++ b/rk3566_einkw6/parameter_ab.txt
+@@ -8,4 +8,4 @@ MACHINE: rk3566_eink
+ CHECK_MASK: 0x80
+ PWR_HLD: 0,0,A,0,1
+ TYPE: GPT
+-CMDLINE:mtdparts=rk29xxnand:0x00002000@0x00002000(security),0x00002000@0x00004000(uboot_a),0x00002000@0x00006000(uboot_b),0x00001000@0x00008000(waveform),0x00002000@0x00009000(trust_a),0x00002000@0x0000b000(trust_b),0x00002000@0x0000d000(misc),0x00002000@0x0000f000(dtbo_a),0x00002000@0x00011000(dtbo_b),0x00000800@0x00013000(vbmeta_a),0x00000800@0x00013800(vbmeta_b),0x00030000@0x00014000(boot_a),0x00030000@0x00044000(boot_b),0x000c0000@0x00074000(backup),0x000c0000@0x00134000(cache),0x00008000@0x001f4000(metadata),0x00000800@0x001fc000(baseparameter),0x00a02000@0x001fc800(super),0x008000@0x00bfe800(logo),-@0x00c06800(userdata:grow)
++CMDLINE:mtdparts=rk29xxnand:0x00002000@0x00002000(security),0x00002000@0x00004000(uboot_a),0x00002000@0x00006000(uboot_b),0x00001000@0x00008000(waveform),0x00002000@0x00009000(trust_a),0x00002000@0x0000b000(trust_b),0x00002000@0x0000d000(misc),0x00002000@0x0000f000(dtbo_a),0x00002000@0x00011000(dtbo_b),0x00000800@0x00013000(vbmeta_a),0x00000800@0x00013800(vbmeta_b),0x00030000@0x00014000(boot_a),0x00030000@0x00044000(boot_b),0x000c0000@0x00074000(backup),0x000c0000@0x00134000(cache),0x00008000@0x001f4000(metadata),0x00000800@0x001fc000(baseparameter),0x00a02000@0x001fc800(super),0x008000@0x00bfe800(logo_a),0x008000@0x00c06800(logo_b),-@0x00c0e800(userdata:grow)
+-- 
+2.17.1
+

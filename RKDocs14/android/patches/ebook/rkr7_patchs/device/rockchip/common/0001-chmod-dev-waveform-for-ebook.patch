@@ -1,0 +1,27 @@
+From 47f5a00876e68f4cd0de3e80a16daff52137cb26 Mon Sep 17 00:00:00 2001
+From: Zorro Liu <lyx@rock-chips.com>
+Date: Thu, 2 Sep 2021 11:10:11 +0800
+Subject: [PATCH] chmod /dev/waveform for ebook
+
+Signed-off-by: Zorro Liu <lyx@rock-chips.com>
+Change-Id: Id9a7a5c3df15a02e1f9c5ac17b208d7fa049be22
+---
+ init.rk30board.rc | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/init.rk30board.rc b/init.rk30board.rc
+index db25dcb3..6b8f9ec2 100755
+--- a/init.rk30board.rc
++++ b/init.rk30board.rc
+@@ -32,6 +32,8 @@ on init
+     #eink
+     chown root system /dev/ebc
+     chmod 0666 /dev/ebc
++    chown root system /dev/waveform
++    chmod 0666 /dev/waveform
+ 
+ on boot
+     chown system system /sys/devices/system/cpu/cpufreq/interactive/timer_rate
+-- 
+2.17.1
+
