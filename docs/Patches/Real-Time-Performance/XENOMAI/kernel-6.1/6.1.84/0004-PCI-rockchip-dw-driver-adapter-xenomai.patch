@@ -1,0 +1,86 @@
+From 079c09bb0b106290e634f02dd8f688a7287c485b Mon Sep 17 00:00:00 2001
+From: Lin Jianhua <linjh@rock-chips.com>
+Date: Mon, 26 May 2025 18:28:03 +0800
+Subject: [PATCH 5/7] PCI: rockchip: dw: driver adapter xenomai
+
+[    3.079938] ------------[ cut here ]------------
+[    3.079941] irqchip rk-pcie-legacy-int is not pipeline-safe!
+[    3.079956] WARNING: CPU: 1 PID: 96 at kernel/irq/chip.c:52
+irq_set_chip+0xbc/0xd0
+[    3.079970] Modules linked in:
+[    3.079976] CPU: 1 PID: 96 Comm: rk-pcie Not tainted 6.1.99 #5
+[    3.079981] Hardware name: Rockchip RK3576 EVB1 V10 Board (DT)
+[    3.079983] IRQ stage: Linux
+[    3.079985] pstate: 600000c5 (nZCv daIF -PAN -UAO -TCO -DIT -SSBS
+		BTYPE=--)
+[    3.079990] pc : irq_set_chip+0xbc/0xd0
+[    3.079996] lr : irq_set_chip+0xbc/0xd0
+[    3.080002] sp : ffffffc00b48b8b0
+[    3.080004] x29: ffffffc00b48b8b0 x28: 0000000000000000 x27:
+0000000000000000
+[    3.080011] x26: 000000005869736d x25: ffffffc0086dfb50 x24:
+ffffff80c2e00800
+[    3.080017] x23: 0000000000000045 x22: 0000000000000045 x21:
+0000000000000000
+[    3.080023] x20: ffffffc00a446820 x19: ffffff80c2e30c00 x18:
+0000000000000020
+[    3.080029] x17: 3030303030323032 x16: 7830206d656d5b20 x15:
+ffffffffffffffff
+[    3.080035] x14: 0000000000000001 x13: 21656661732d656e x12:
+696c657069702074
+[    3.080041] x11: ffffffc00a2a3d38 x10: ffffffffffffffff x9 :
+ffffffc0080b9b84
+[    3.080047] x8 : 00000000ffffffff x7 : 656e696c65706970 x6 :
+0000000000000003
+[    3.080053] x5 : ffffff81f6d3dad0 x4 : 0000000000000000 x3 :
+0000000000000027
+[    3.080059] x2 : 0000000000000000 x1 : 0000000000000000 x0 :
+ffffff80c0a35400
+[    3.080065] Call trace:
+[    3.080067]  irq_set_chip+0xbc/0xd0
+[    3.080074]  irq_set_chip_and_handler_name+0x3c/0xa4
+[    3.080079]  rk_pcie_intx_map+0x3c/0x60
+[    3.080086]  irq_domain_associate_locked+0x70/0x1d0
+[    3.080092]  irq_create_mapping_affinity_locked+0x88/0x1a4
+[    3.080097]  irq_create_fwspec_mapping+0xfc/0x330
+[    3.080103]  irq_create_of_mapping+0x6c/0x90
+[    3.080108]  of_irq_parse_and_map_pci+0x16c/0x250
+[    3.080114]  pci_assign_irq+0xd4/0x130
+[    3.080119]  pci_device_probe+0x38/0x140
+[    3.080124]  really_probe+0xc4/0x3e0
+[    3.080131]  __driver_probe_device+0x80/0x160
+[    3.080136]  driver_probe_device+0x40/0x110
+[    3.080141]  __device_attach_driver+0xb8/0x150
+[    3.080147]  bus_for_each_drv+0x7c/0xd0
+[    3.080151]  __device_attach+0xac/0x1e4
+[    3.080156]  device_attach+0x18/0x20
+[    3.080161]  pci_bus_add_device+0x54/0xc0
+[    3.080166]  pci_bus_add_devices+0x40/0x90
+[    3.080170]  pci_host_probe+0x44/0xc4
+[    3.080175]  dw_pcie_host_init+0x204/0x670
+[    3.080181]  rk_pcie_really_probe+0x4b4/0x9c4
+[    3.080187]  kthread+0xdc/0xe0
+[    3.080193]  ret_from_fork+0x10/0x20
+
+Change-Id: I9184628c8ffe32068c8e02dca8fd4c457e044398
+Signed-off-by: Lin Jianhua <linjh@rock-chips.com>
+---
+ drivers/pci/controller/dwc/pcie-dw-rockchip.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-dw-rockchip.c b/drivers/pci/controller/dwc/pcie-dw-rockchip.c
+index 2e4a5394cac1..4f2faead802e 100644
+--- a/drivers/pci/controller/dwc/pcie-dw-rockchip.c
++++ b/drivers/pci/controller/dwc/pcie-dw-rockchip.c
+@@ -971,7 +971,7 @@ static struct irq_chip rk_pcie_legacy_irq_chip = {
+ 	.irq_disable	= rk_pcie_legacy_irq_mask,
+ 	.irq_mask	= rk_pcie_legacy_irq_mask,
+ 	.irq_unmask	= rk_pcie_legacy_irq_unmask,
+-	.flags		= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MASK_ON_SUSPEND,
++	.flags		= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_PIPELINE_SAFE,
+ };
+ 
+ static int rk_pcie_intx_map(struct irq_domain *domain, unsigned int irq,
+-- 
+2.34.1
+

@@ -1,0 +1,41 @@
+From 1a85faaa6e1bb51afb2349286cfa55213caada07 Mon Sep 17 00:00:00 2001
+From: Lin Jianhua <linjh@rock-chips.com>
+Date: Mon, 12 May 2025 09:26:52 +0800
+Subject: [PATCH 4/4] ARM64: rockchip_linux_defconfig: optimize latency for
+ xenomai
+
+Change-Id: I38758b62195b776967d3235f4073939cdd393332
+Signed-off-by: Lin Jianhua <linjh@rock-chips.com>
+---
+ arch/arm64/configs/rockchip_linux_defconfig | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/configs/rockchip_linux_defconfig b/arch/arm64/configs/rockchip_linux_defconfig
+index eedfbfccffe8e..30d9f59fd5495 100644
+--- a/arch/arm64/configs/rockchip_linux_defconfig
++++ b/arch/arm64/configs/rockchip_linux_defconfig
+@@ -77,9 +77,10 @@ CONFIG_PM_DEBUG=y
+ CONFIG_PM_ADVANCED_DEBUG=y
+ CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+ CONFIG_ENERGY_MODEL=y
+-CONFIG_CPU_IDLE=y
+-CONFIG_ARM_PSCI_CPUIDLE=y
++# CONFIG_CPU_IDLE is not set
++# CONFIG_ARM_PSCI_CPUIDLE is not set
+ CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
+ CONFIG_CPU_FREQ_STAT=y
+ CONFIG_CPU_FREQ_GOV_POWERSAVE=y
+ CONFIG_CPU_FREQ_GOV_USERSPACE=y
+@@ -577,7 +578,7 @@ CONFIG_DEVFREQ_GOV_PERFORMANCE=y
+ CONFIG_DEVFREQ_GOV_POWERSAVE=y
+ CONFIG_DEVFREQ_GOV_USERSPACE=y
+ CONFIG_ARM_ROCKCHIP_BUS_DEVFREQ=y
+-CONFIG_ARM_ROCKCHIP_DMC_DEVFREQ=y
++# CONFIG_ARM_ROCKCHIP_DMC_DEVFREQ is not set
+ CONFIG_DEVFREQ_EVENT_ROCKCHIP_NOCP=y
+ CONFIG_MEMORY=y
+ CONFIG_ROCKCHIP_DSMC=y
+-- 
+2.34.1
+

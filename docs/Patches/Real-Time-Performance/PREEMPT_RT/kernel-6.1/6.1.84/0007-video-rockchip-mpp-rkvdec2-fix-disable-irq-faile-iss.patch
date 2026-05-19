@@ -1,0 +1,44 @@
+From 5a95026b4d11960a310087b4e2956d6ccf09bba4 Mon Sep 17 00:00:00 2001
+From: Hongjin Li <vic.hong@rock-chips.com>
+Date: Wed, 9 Apr 2025 09:57:43 +0800
+Subject: [PATCH 7/7] video: rockchip: mpp: rkvdec2: fix disable irq faile
+ issue
+
+Change-Id: I9b846a9533951356e5f3e76647e37b226f84954d
+Signed-off-by: Hongjin Li <vic.hong@rock-chips.com>
+---
+ drivers/video/rockchip/mpp/mpp_rkvdec2.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/video/rockchip/mpp/mpp_rkvdec2.c b/drivers/video/rockchip/mpp/mpp_rkvdec2.c
+index 50ec9334ddc4..46bd361f792f 100644
+--- a/drivers/video/rockchip/mpp/mpp_rkvdec2.c
++++ b/drivers/video/rockchip/mpp/mpp_rkvdec2.c
+@@ -1421,7 +1421,7 @@ static int rkvdec_vdpu383_reset(struct mpp_dev *mpp)
+ 	mpp_debug_enter();
+ 
+ 	/* disable irq */
+-	writel(link->info->ip_en_val & BIT(15), link->reg_base + link->info->ip_en_base);
++	writel(link->info->ip_en_val | BIT(15), link->reg_base + link->info->ip_en_base);
+ 	/* use ip reset to reset core and mmu */
+ 	writel(link->info->ip_reset_en, link->reg_base + link->info->ip_reset_base);
+ 	ret = readl_relaxed_poll_timeout(link->reg_base + link->info->status_base,
+@@ -1904,6 +1904,7 @@ static int rkvdec2_probe_default(struct platform_device *pdev)
+ 
+ 	mpp = &dec->mpp;
+ 	platform_set_drvdata(pdev, mpp);
++	mpp->is_irq_startup = false;
+ 
+ 	if (pdev->dev.of_node) {
+ 		match = of_match_node(mpp_rkvdec2_dt_match, pdev->dev.of_node);
+@@ -1937,6 +1938,7 @@ static int rkvdec2_probe_default(struct platform_device *pdev)
+ 		return -EINVAL;
+ 	}
+ 
++	mpp->is_irq_startup = true;
+ 	mpp->session_max_buffers = RKVDEC_SESSION_MAX_BUFFERS;
+ 	rkvdec2_procfs_init(mpp);
+ 	if (dec->link_dec && (mpp->task_capacity > 1))
+-- 
+2.34.1
+

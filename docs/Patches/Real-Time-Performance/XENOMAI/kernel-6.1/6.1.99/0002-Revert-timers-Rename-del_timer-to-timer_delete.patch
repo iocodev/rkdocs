@@ -1,0 +1,85 @@
+From 7a4d5ad4972b07be23b56a4ee28ef0ac71c99843 Mon Sep 17 00:00:00 2001
+From: Lin Jianhua <linjh@rock-chips.com>
+Date: Wed, 11 Dec 2024 20:00:41 +0800
+Subject: [PATCH 2/7] Revert "timers: Rename del_timer() to timer_delete()"
+
+This reverts commit b086d1e82fcd4a815a646e3f4c5fd2b03a817c70.
+---
+ include/linux/timer.h | 15 +--------------
+ kernel/time/timer.c   |  6 +++---
+ 2 files changed, 4 insertions(+), 17 deletions(-)
+
+diff --git a/include/linux/timer.h b/include/linux/timer.h
+index e338e173ce8b..551fa467726f 100644
+--- a/include/linux/timer.h
++++ b/include/linux/timer.h
+@@ -169,6 +169,7 @@ static inline int timer_pending(const struct timer_list * timer)
+ }
+ 
+ extern void add_timer_on(struct timer_list *timer, int cpu);
++extern int del_timer(struct timer_list * timer);
+ extern int mod_timer(struct timer_list *timer, unsigned long expires);
+ extern int mod_timer_pending(struct timer_list *timer, unsigned long expires);
+ extern int timer_reduce(struct timer_list *timer, unsigned long expires);
+@@ -183,7 +184,6 @@ extern void add_timer(struct timer_list *timer);
+ 
+ extern int try_to_del_timer_sync(struct timer_list *timer);
+ extern int timer_delete_sync(struct timer_list *timer);
+-extern int timer_delete(struct timer_list *timer);
+ 
+ /**
+  * del_timer_sync - Delete a pending timer and wait for a running callback
+@@ -198,19 +198,6 @@ static inline int del_timer_sync(struct timer_list *timer)
+ 	return timer_delete_sync(timer);
+ }
+ 
+-/**
+- * del_timer - Delete a pending timer
+- * @timer:	The timer to be deleted
+- *
+- * See timer_delete() for detailed explanation.
+- *
+- * Do not use in new code. Use timer_delete() instead.
+- */
+-static inline int del_timer(struct timer_list *timer)
+-{
+-	return timer_delete(timer);
+-}
+-
+ extern void init_timers(void);
+ struct hrtimer;
+ extern enum hrtimer_restart it_real_fn(struct hrtimer *);
+diff --git a/kernel/time/timer.c b/kernel/time/timer.c
+index e09852be4e63..f5f938140cea 100644
+--- a/kernel/time/timer.c
++++ b/kernel/time/timer.c
+@@ -1255,7 +1255,7 @@ void add_timer_on(struct timer_list *timer, int cpu)
+ EXPORT_SYMBOL_GPL(add_timer_on);
+ 
+ /**
+- * timer_delete - Deactivate a timer
++ * del_timer - Deactivate a timer.
+  * @timer:	The timer to be deactivated
+  *
+  * The function only deactivates a pending timer, but contrary to
+@@ -1268,7 +1268,7 @@ EXPORT_SYMBOL_GPL(add_timer_on);
+  * * %0 - The timer was not pending
+  * * %1 - The timer was pending and deactivated
+  */
+-int timer_delete(struct timer_list *timer)
++int del_timer(struct timer_list *timer)
+ {
+ 	struct timer_base *base;
+ 	unsigned long flags;
+@@ -1284,7 +1284,7 @@ int timer_delete(struct timer_list *timer)
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL(timer_delete);
++EXPORT_SYMBOL(del_timer);
+ 
+ /**
+  * try_to_del_timer_sync - Try to deactivate a timer
+-- 
+2.34.1
+

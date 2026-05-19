@@ -1,0 +1,1569 @@
+From eae92b7e83513654331650f728791e9598276ba6 Mon Sep 17 00:00:00 2001
+From: Simon Xue <xxm@rock-chips.com>
+Date: Fri, 20 Sep 2024 10:39:25 +0800
+Subject: [PATCH] dma-buf : add support ANDROID and RK feature
+
+Change-Id: Ieb3e7a0afedb93c42499c1f601f7c37426b770fe
+Signed-off-by: Simon Xue <xxm@rock-chips.com>
+---
+ drivers/dma-buf/dma-buf-sysfs-stats.c        |  76 +++--
+ drivers/dma-buf/dma-buf.c                    |  74 ++++-
+ drivers/dma-buf/dma-heap.c                   | 198 +++++++++++--
+ drivers/dma-buf/heaps/Kconfig                |  15 +-
+ drivers/dma-buf/heaps/Makefile               |   6 +-
+ drivers/dma-buf/heaps/deferred-free-helper.c | 138 +++++++++
+ drivers/dma-buf/heaps/page_pool.c            | 294 +++++++++++++++++++
+ drivers/dma-buf/heaps/page_pool.h            |  27 ++
+ drivers/dma-buf/heaps/rk_cma_heap.c          |  20 +-
+ drivers/dma-buf/heaps/rk_system_heap.c       |  63 ++--
+ include/linux/dma-buf.h                      |  82 ++++++
+ include/linux/dma-heap.h                     |  56 ++++
+ 12 files changed, 947 insertions(+), 102 deletions(-)
+ create mode 100644 drivers/dma-buf/heaps/deferred-free-helper.c
+ create mode 100644 drivers/dma-buf/heaps/page_pool.c
+ create mode 100644 drivers/dma-buf/heaps/page_pool.h
+
+diff --git a/drivers/dma-buf/dma-buf-sysfs-stats.c b/drivers/dma-buf/dma-buf-sysfs-stats.c
+index 4b680e10c15a..4f3ee92dbe1b 100644
+--- a/drivers/dma-buf/dma-buf-sysfs-stats.c
++++ b/drivers/dma-buf/dma-buf-sysfs-stats.c
+@@ -11,6 +11,7 @@
+ #include <linux/printk.h>
+ #include <linux/slab.h>
+ #include <linux/sysfs.h>
++#include <linux/workqueue.h>
+ 
+ #include "dma-buf-sysfs-stats.h"
+ 
+@@ -168,35 +169,76 @@ void dma_buf_uninit_sysfs_statistics(void)
+ 	kset_unregister(dma_buf_stats_kset);
+ }
+ 
++struct dma_buf_create_sysfs_entry {
++	struct dma_buf *dmabuf;
++	struct work_struct work;
++};
++
++union dma_buf_create_sysfs_work_entry {
++	struct dma_buf_create_sysfs_entry create_entry;
++	struct dma_buf_sysfs_entry sysfs_entry;
++};
++
++static void sysfs_add_workfn(struct work_struct *work)
++{
++	struct dma_buf_create_sysfs_entry *create_entry =
++		container_of(work, struct dma_buf_create_sysfs_entry, work);
++	struct dma_buf *dmabuf = create_entry->dmabuf;
++
++	/*
++	 * A dmabuf is ref-counted via its file member. If this handler holds the only
++	 * reference to the dmabuf, there is no need for sysfs kobject creation. This is an
++	 * optimization and a race; when the reference count drops to 1 immediately after
++	 * this check it is not harmful as the sysfs entry will still get cleaned up in
++	 * dma_buf_stats_teardown, which won't get called until the final dmabuf reference
++	 * is released, and that can't happen until the end of this function.
++	 */
++	if (file_count(dmabuf->file) > 1) {
++		dmabuf->sysfs_entry->dmabuf = dmabuf;
++		/*
++		 * kobject_init_and_add expects kobject to be zero-filled, but we have populated it
++		 * (the sysfs_add_work union member) to trigger this work function.
++		 */
++		memset(&dmabuf->sysfs_entry->kobj, 0, sizeof(dmabuf->sysfs_entry->kobj));
++		dmabuf->sysfs_entry->kobj.kset = dma_buf_per_buffer_stats_kset;
++		if (kobject_init_and_add(&dmabuf->sysfs_entry->kobj, &dma_buf_ktype, NULL,
++						"%lu", file_inode(dmabuf->file)->i_ino)) {
++			kobject_put(&dmabuf->sysfs_entry->kobj);
++			dmabuf->sysfs_entry = NULL;
++		}
++	} else {
++		/*
++		 * Free the sysfs_entry and reset the pointer so dma_buf_stats_teardown doesn't
++		 * attempt to operate on it.
++		 */
++		kfree(dmabuf->sysfs_entry);
++		dmabuf->sysfs_entry = NULL;
++	}
++	dma_buf_put(dmabuf);
++}
++
+ int dma_buf_stats_setup(struct dma_buf *dmabuf, struct file *file)
+ {
+-	struct dma_buf_sysfs_entry *sysfs_entry;
+-	int ret;
++	struct dma_buf_create_sysfs_entry *create_entry;
++	union dma_buf_create_sysfs_work_entry *work_entry;
+ 
+ 	if (!dmabuf->exp_name) {
+ 		pr_err("exporter name must not be empty if stats needed\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	sysfs_entry = kzalloc(sizeof(struct dma_buf_sysfs_entry), GFP_KERNEL);
+-	if (!sysfs_entry)
++	work_entry = kmalloc(sizeof(union dma_buf_create_sysfs_work_entry), GFP_KERNEL);
++	if (!work_entry)
+ 		return -ENOMEM;
+ 
+-	sysfs_entry->kobj.kset = dma_buf_per_buffer_stats_kset;
+-	sysfs_entry->dmabuf = dmabuf;
++	dmabuf->sysfs_entry = &work_entry->sysfs_entry;
+ 
+-	dmabuf->sysfs_entry = sysfs_entry;
++	create_entry = &work_entry->create_entry;
++	create_entry->dmabuf = dmabuf;
+ 
+-	/* create the directory for buffer stats */
+-	ret = kobject_init_and_add(&sysfs_entry->kobj, &dma_buf_ktype, NULL,
+-				   "%lu", file_inode(file)->i_ino);
+-	if (ret)
+-		goto err_sysfs_dmabuf;
++	INIT_WORK(&create_entry->work, sysfs_add_workfn);
++	get_dma_buf(dmabuf); /* This reference will be dropped in sysfs_add_workfn. */
++	schedule_work(&create_entry->work);
+ 
+ 	return 0;
+-
+-err_sysfs_dmabuf:
+-	kobject_put(&sysfs_entry->kobj);
+-	dmabuf->sysfs_entry = NULL;
+-	return ret;
+ }
+diff --git a/drivers/dma-buf/dma-buf.c b/drivers/dma-buf/dma-buf.c
+index f804618f9bb7..ab4a7e2938b7 100644
+--- a/drivers/dma-buf/dma-buf.c
++++ b/drivers/dma-buf/dma-buf.c
+@@ -34,8 +34,6 @@
+ 
+ #include "dma-buf-sysfs-stats.h"
+ 
+-static inline int is_dma_buf_file(struct file *);
+-
+ struct dma_buf_list {
+ 	struct list_head head;
+ 	struct mutex lock;
+@@ -671,10 +669,11 @@ static const struct file_operations dma_buf_fops = {
+ /*
+  * is_dma_buf_file - Check if struct file* is associated with dma_buf
+  */
+-static inline int is_dma_buf_file(struct file *file)
++int is_dma_buf_file(struct file *file)
+ {
+ 	return file->f_op == &dma_buf_fops;
+ }
++EXPORT_SYMBOL_NS_GPL(is_dma_buf_file, DMA_BUF);
+ 
+ static struct file *dma_buf_getfile(size_t size, int flags)
+ {
+@@ -831,10 +830,6 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
+ 		dmabuf->resv = resv;
+ 	}
+ 
+-	ret = dma_buf_stats_setup(dmabuf, file);
+-	if (ret)
+-		goto err_dmabuf;
+-
+ 	file->private_data = dmabuf;
+ 	file->f_path.dentry->d_fsdata = dmabuf;
+ 	dmabuf->file = file;
+@@ -847,12 +842,22 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
+ #endif
+ 	mutex_unlock(&db_list.lock);
+ 
++	ret = dma_buf_stats_setup(dmabuf, file);
++	if (ret)
++		goto err_sysfs;
++
+ 	if (IS_ENABLED(CONFIG_RK_DMABUF_DEBUG))
+ 		dma_buf_set_default_name(dmabuf);
+ 
+ 	return dmabuf;
+ 
+-err_dmabuf:
++err_sysfs:
++	mutex_lock(&db_list.lock);
++	list_del(&dmabuf->list_node);
++	mutex_unlock(&db_list.lock);
++	dmabuf->file = NULL;
++	file->f_path.dentry->d_fsdata = NULL;
++	file->private_data = NULL;
+ 	if (!resv)
+ 		dma_resv_fini(dmabuf->resv);
+ 	kfree(dmabuf);
+@@ -1532,6 +1537,30 @@ int dma_buf_begin_cpu_access(struct dma_buf *dmabuf,
+ }
+ EXPORT_SYMBOL_NS_GPL(dma_buf_begin_cpu_access, DMA_BUF);
+ 
++int dma_buf_begin_cpu_access_partial(struct dma_buf *dmabuf,
++				     enum dma_data_direction direction,
++				     unsigned int offset, unsigned int len)
++{
++	int ret = 0;
++
++	if (WARN_ON(!dmabuf))
++		return -EINVAL;
++
++	if (dmabuf->ops->begin_cpu_access_partial)
++		ret = dmabuf->ops->begin_cpu_access_partial(dmabuf, direction,
++							    offset, len);
++
++	/* Ensure that all fences are waited upon - but we first allow
++	 * the native handler the chance to do so more efficiently if it
++	 * chooses. A double invocation here will be reasonably cheap no-op.
++	 */
++	if (ret == 0)
++		ret = __dma_buf_begin_cpu_access(dmabuf, direction);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dma_buf_begin_cpu_access_partial);
++
+ /**
+  * dma_buf_end_cpu_access - Must be called after accessing a dma_buf from the
+  * cpu in the kernel context. Calls end_cpu_access to allow exporter-specific
+@@ -1560,6 +1589,21 @@ int dma_buf_end_cpu_access(struct dma_buf *dmabuf,
+ }
+ EXPORT_SYMBOL_NS_GPL(dma_buf_end_cpu_access, DMA_BUF);
+ 
++int dma_buf_end_cpu_access_partial(struct dma_buf *dmabuf,
++				   enum dma_data_direction direction,
++				   unsigned int offset, unsigned int len)
++{
++	int ret = 0;
++
++	WARN_ON(!dmabuf);
++
++	if (dmabuf->ops->end_cpu_access_partial)
++		ret = dmabuf->ops->end_cpu_access_partial(dmabuf, direction,
++							  offset, len);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dma_buf_end_cpu_access_partial);
+ 
+ /**
+  * dma_buf_mmap - Setup up a userspace mmap with the given vma
+@@ -1680,6 +1724,20 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ }
+ EXPORT_SYMBOL_NS_GPL(dma_buf_vunmap, DMA_BUF);
+ 
++int dma_buf_get_flags(struct dma_buf *dmabuf, unsigned long *flags)
++{
++	int ret = 0;
++
++	if (WARN_ON(!dmabuf) || !flags)
++		return -EINVAL;
++
++	if (dmabuf->ops->get_flags)
++		ret = dmabuf->ops->get_flags(dmabuf, flags);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dma_buf_get_flags);
++
+ #ifdef CONFIG_DEBUG_FS
+ static int dma_buf_debug_show(struct seq_file *s, void *unused)
+ {
+diff --git a/drivers/dma-buf/dma-heap.c b/drivers/dma-buf/dma-heap.c
+index fa799d4b7ad7..004f9609c134 100644
+--- a/drivers/dma-buf/dma-heap.c
++++ b/drivers/dma-buf/dma-heap.c
+@@ -31,6 +31,7 @@
+  * @heap_devt		heap device node
+  * @list		list head connecting to list of heaps
+  * @heap_cdev		heap char device
++ * @heap_dev		heap device struct
+  *
+  * Represents a heap of memory from which buffers can be made.
+  */
+@@ -41,6 +42,8 @@ struct dma_heap {
+ 	dev_t heap_devt;
+ 	struct list_head list;
+ 	struct cdev heap_cdev;
++	struct kref refcount;
++	struct device *heap_dev;
+ };
+ 
+ static LIST_HEAD(heap_list);
+@@ -49,22 +52,60 @@ static dev_t dma_heap_devt;
+ static struct class *dma_heap_class;
+ static DEFINE_XARRAY_ALLOC(dma_heap_minors);
+ 
+-static int dma_heap_buffer_alloc(struct dma_heap *heap, size_t len,
+-				 unsigned int fd_flags,
+-				 unsigned int heap_flags)
++struct dma_heap *dma_heap_find(const char *name)
+ {
+-	struct dma_buf *dmabuf;
+-	int fd;
++	struct dma_heap *h;
++
++	mutex_lock(&heap_list_lock);
++	list_for_each_entry(h, &heap_list, list) {
++		if (!strcmp(h->name, name)) {
++			kref_get(&h->refcount);
++			mutex_unlock(&heap_list_lock);
++			return h;
++		}
++	}
++	mutex_unlock(&heap_list_lock);
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(dma_heap_find);
++
+ 
++void dma_heap_buffer_free(struct dma_buf *dmabuf)
++{
++	dma_buf_put(dmabuf);
++}
++EXPORT_SYMBOL_GPL(dma_heap_buffer_free);
++
++struct dma_buf *dma_heap_buffer_alloc(struct dma_heap *heap, size_t len,
++				      unsigned int fd_flags,
++				      unsigned int heap_flags)
++{
++	if (fd_flags & ~DMA_HEAP_VALID_FD_FLAGS)
++		return ERR_PTR(-EINVAL);
++
++	if (heap_flags & ~DMA_HEAP_VALID_HEAP_FLAGS)
++		return ERR_PTR(-EINVAL);
+ 	/*
+ 	 * Allocations from all heaps have to begin
+ 	 * and end on page boundaries.
+ 	 */
+ 	len = PAGE_ALIGN(len);
+ 	if (!len)
+-		return -EINVAL;
++		return ERR_PTR(-EINVAL);
++
++	return heap->ops->allocate(heap, len, fd_flags, heap_flags);
++}
++EXPORT_SYMBOL_GPL(dma_heap_buffer_alloc);
++
++int dma_heap_bufferfd_alloc(struct dma_heap *heap, size_t len,
++			    unsigned int fd_flags,
++			    unsigned int heap_flags)
++{
++	struct dma_buf *dmabuf;
++	int fd;
++
++	dmabuf = dma_heap_buffer_alloc(heap, len, fd_flags, heap_flags);
+ 
+-	dmabuf = heap->ops->allocate(heap, len, fd_flags, heap_flags);
+ 	if (IS_ERR(dmabuf))
+ 		return PTR_ERR(dmabuf);
+ 
+@@ -74,7 +115,9 @@ static int dma_heap_buffer_alloc(struct dma_heap *heap, size_t len,
+ 		/* just return, as put will call release and that will free */
+ 	}
+ 	return fd;
++
+ }
++EXPORT_SYMBOL_GPL(dma_heap_bufferfd_alloc);
+ 
+ static int dma_heap_open(struct inode *inode, struct file *file)
+ {
+@@ -102,15 +145,9 @@ static long dma_heap_ioctl_allocate(struct file *file, void *data)
+ 	if (heap_allocation->fd)
+ 		return -EINVAL;
+ 
+-	if (heap_allocation->fd_flags & ~DMA_HEAP_VALID_FD_FLAGS)
+-		return -EINVAL;
+-
+-	if (heap_allocation->heap_flags & ~DMA_HEAP_VALID_HEAP_FLAGS)
+-		return -EINVAL;
+-
+-	fd = dma_heap_buffer_alloc(heap, heap_allocation->len,
+-				   heap_allocation->fd_flags,
+-				   heap_allocation->heap_flags);
++	fd = dma_heap_bufferfd_alloc(heap, heap_allocation->len,
++				     heap_allocation->fd_flags,
++				     heap_allocation->heap_flags);
+ 	if (fd < 0)
+ 		return fd;
+ 
+@@ -220,6 +257,47 @@ void *dma_heap_get_drvdata(struct dma_heap *heap)
+ {
+ 	return heap->priv;
+ }
++EXPORT_SYMBOL_GPL(dma_heap_get_drvdata);
++
++static void dma_heap_release(struct kref *ref)
++{
++	struct dma_heap *heap = container_of(ref, struct dma_heap, refcount);
++	int minor = MINOR(heap->heap_devt);
++
++	/* Note, we already holding the heap_list_lock here */
++	list_del(&heap->list);
++
++	device_destroy(dma_heap_class, heap->heap_devt);
++	cdev_del(&heap->heap_cdev);
++	xa_erase(&dma_heap_minors, minor);
++
++	kfree(heap);
++}
++
++void dma_heap_put(struct dma_heap *h)
++{
++	/*
++	 * Take the heap_list_lock now to avoid racing with code
++	 * scanning the list and then taking a kref.
++	 */
++	mutex_lock(&heap_list_lock);
++	kref_put(&h->refcount, dma_heap_release);
++	mutex_unlock(&heap_list_lock);
++}
++EXPORT_SYMBOL_GPL(dma_heap_put);
++
++/**
++ * dma_heap_get_dev() - get device struct for the heap
++ * @heap: DMA-Heap to retrieve device struct from
++ *
++ * Returns:
++ * The device struct for the heap.
++ */
++struct device *dma_heap_get_dev(struct dma_heap *heap)
++{
++	return heap->heap_dev;
++}
++EXPORT_SYMBOL_GPL(dma_heap_get_dev);
+ 
+ /**
+  * dma_heap_get_name() - get heap name
+@@ -232,11 +310,11 @@ const char *dma_heap_get_name(struct dma_heap *heap)
+ {
+ 	return heap->name;
+ }
++EXPORT_SYMBOL_GPL(dma_heap_get_name);
+ 
+ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info)
+ {
+ 	struct dma_heap *heap, *h, *err_ret;
+-	struct device *dev_ret;
+ 	unsigned int minor;
+ 	int ret;
+ 
+@@ -254,6 +332,7 @@ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info)
+ 	if (!heap)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	kref_init(&heap->refcount);
+ 	heap->name = exp_info->name;
+ 	heap->ops = exp_info->ops;
+ 	heap->priv = exp_info->priv;
+@@ -278,17 +357,20 @@ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info)
+ 		goto err1;
+ 	}
+ 
+-	dev_ret = device_create(dma_heap_class,
+-				NULL,
+-				heap->heap_devt,
+-				NULL,
+-				heap->name);
+-	if (IS_ERR(dev_ret)) {
++	heap->heap_dev = device_create(dma_heap_class,
++				       NULL,
++				       heap->heap_devt,
++				       NULL,
++				       heap->name);
++	if (IS_ERR(heap->heap_dev)) {
+ 		pr_err("dma_heap: Unable to create device\n");
+-		err_ret = ERR_CAST(dev_ret);
++		err_ret = ERR_CAST(heap->heap_dev);
+ 		goto err2;
+ 	}
+ 
++	/* Make sure it doesn't disappear on us */
++	heap->heap_dev = get_device(heap->heap_dev);
++
+ 	mutex_lock(&heap_list_lock);
+ 	/* check the name is unique */
+ 	list_for_each_entry(h, &heap_list, list) {
+@@ -297,6 +379,7 @@ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info)
+ 			pr_err("dma_heap: Already registered heap named %s\n",
+ 			       exp_info->name);
+ 			err_ret = ERR_PTR(-EINVAL);
++			put_device(heap->heap_dev);
+ 			goto err3;
+ 		}
+ 	}
+@@ -317,27 +400,88 @@ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info)
+ 	kfree(heap);
+ 	return err_ret;
+ }
++EXPORT_SYMBOL_GPL(dma_heap_add);
+ 
+ static char *dma_heap_devnode(struct device *dev, umode_t *mode)
+ {
+ 	return kasprintf(GFP_KERNEL, "dma_heap/%s", dev_name(dev));
+ }
+ 
++static ssize_t total_pools_kb_show(struct kobject *kobj,
++				   struct kobj_attribute *attr, char *buf)
++{
++	struct dma_heap *heap;
++	u64 total_pool_size = 0;
++
++	mutex_lock(&heap_list_lock);
++	list_for_each_entry(heap, &heap_list, list) {
++		if (heap->ops->get_pool_size)
++			total_pool_size += heap->ops->get_pool_size(heap);
++	}
++	mutex_unlock(&heap_list_lock);
++
++	return sysfs_emit(buf, "%llu\n", total_pool_size / 1024);
++}
++
++static struct kobj_attribute total_pools_kb_attr =
++	__ATTR_RO(total_pools_kb);
++
++static struct attribute *dma_heap_sysfs_attrs[] = {
++	&total_pools_kb_attr.attr,
++	NULL,
++};
++
++ATTRIBUTE_GROUPS(dma_heap_sysfs);
++
++static struct kobject *dma_heap_kobject;
++
++static int dma_heap_sysfs_setup(void)
++{
++	int ret;
++
++	dma_heap_kobject = kobject_create_and_add("dma_heap", kernel_kobj);
++	if (!dma_heap_kobject)
++		return -ENOMEM;
++
++	ret = sysfs_create_groups(dma_heap_kobject, dma_heap_sysfs_groups);
++	if (ret) {
++		kobject_put(dma_heap_kobject);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void dma_heap_sysfs_teardown(void)
++{
++	kobject_put(dma_heap_kobject);
++}
++
+ static int dma_heap_init(void)
+ {
+ 	int ret;
+ 
+-	ret = alloc_chrdev_region(&dma_heap_devt, 0, NUM_HEAP_MINORS, DEVNAME);
++	ret = dma_heap_sysfs_setup();
+ 	if (ret)
+ 		return ret;
+ 
++	ret = alloc_chrdev_region(&dma_heap_devt, 0, NUM_HEAP_MINORS, DEVNAME);
++	if (ret)
++		goto err_chrdev;
++
+ 	dma_heap_class = class_create(THIS_MODULE, DEVNAME);
+ 	if (IS_ERR(dma_heap_class)) {
+-		unregister_chrdev_region(dma_heap_devt, NUM_HEAP_MINORS);
+-		return PTR_ERR(dma_heap_class);
++		ret = PTR_ERR(dma_heap_class);
++		goto err_class;
+ 	}
+ 	dma_heap_class->devnode = dma_heap_devnode;
+ 
+ 	return 0;
++
++err_class:
++	unregister_chrdev_region(dma_heap_devt, NUM_HEAP_MINORS);
++err_chrdev:
++	dma_heap_sysfs_teardown();
++	return ret;
+ }
+ subsys_initcall(dma_heap_init);
+diff --git a/drivers/dma-buf/heaps/Kconfig b/drivers/dma-buf/heaps/Kconfig
+index 464e7cf15b50..e8e22c24401e 100644
+--- a/drivers/dma-buf/heaps/Kconfig
++++ b/drivers/dma-buf/heaps/Kconfig
+@@ -1,12 +1,23 @@
++menuconfig DMABUF_HEAPS_DEFERRED_FREE
++	bool "DMA-BUF heaps deferred-free library"
++	help
++	  Choose this option to enable the DMA-BUF heaps deferred-free library.
++
++menuconfig DMABUF_HEAPS_PAGE_POOL
++	bool "DMA-BUF heaps page-pool library"
++	help
++	  Choose this option to enable the DMA-BUF heaps page-pool library.
++
+ config DMABUF_HEAPS_SYSTEM
+-	bool "DMA-BUF System Heap"
++	tristate "DMA-BUF System Heap"
+ 	depends on DMABUF_HEAPS
++	select DMABUF_HEAPS_PAGE_POOL
+ 	help
+ 	  Choose this option to enable the system dmabuf heap. The system heap
+ 	  is backed by pages from the buddy allocator. If in doubt, say Y.
+ 
+ config DMABUF_HEAPS_CMA
+-	bool "DMA-BUF CMA Heap"
++	tristate "DMA-BUF CMA Heap"
+ 	depends on DMABUF_HEAPS && DMA_CMA
+ 	help
+ 	  Choose this option to enable dma-buf CMA heap. This heap is backed
+diff --git a/drivers/dma-buf/heaps/Makefile b/drivers/dma-buf/heaps/Makefile
+index 2c71813d0dd4..07ba63081b0f 100644
+--- a/drivers/dma-buf/heaps/Makefile
++++ b/drivers/dma-buf/heaps/Makefile
+@@ -1,4 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+-obj-$(CONFIG_DMABUF_HEAPS_SYSTEM)	+= system_heap.o
+-obj-$(CONFIG_DMABUF_HEAPS_CMA)		+= cma_heap.o
++obj-$(CONFIG_DMABUF_HEAPS_DEFERRED_FREE) += deferred-free-helper.o
++obj-$(CONFIG_DMABUF_HEAPS_PAGE_POOL)	+= page_pool.o
++obj-$(CONFIG_DMABUF_HEAPS_SYSTEM)	+= rk_system_heap.o
++obj-$(CONFIG_DMABUF_HEAPS_CMA)		+= rk_cma_heap.o
+ obj-$(CONFIG_DMABUF_HEAPS_SRAM)	+= sram_heap.o
+diff --git a/drivers/dma-buf/heaps/deferred-free-helper.c b/drivers/dma-buf/heaps/deferred-free-helper.c
+new file mode 100644
+index 000000000000..bae271720011
+--- /dev/null
++++ b/drivers/dma-buf/heaps/deferred-free-helper.c
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Deferred dmabuf freeing helper
++ *
++ * Copyright (C) 2020 Linaro, Ltd.
++ *
++ * Based on the ION page pool code
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#include <linux/freezer.h>
++#include <linux/list.h>
++#include <linux/slab.h>
++#include <linux/swap.h>
++#include <linux/sched/signal.h>
++
++#include "deferred-free-helper.h"
++
++static LIST_HEAD(free_list);
++static size_t list_nr_pages;
++wait_queue_head_t freelist_waitqueue;
++struct task_struct *freelist_task;
++static DEFINE_SPINLOCK(free_list_lock);
++
++void deferred_free(struct deferred_freelist_item *item,
++		   void (*free)(struct deferred_freelist_item*,
++				enum df_reason),
++		   size_t nr_pages)
++{
++	unsigned long flags;
++
++	INIT_LIST_HEAD(&item->list);
++	item->nr_pages = nr_pages;
++	item->free = free;
++
++	spin_lock_irqsave(&free_list_lock, flags);
++	list_add(&item->list, &free_list);
++	list_nr_pages += nr_pages;
++	spin_unlock_irqrestore(&free_list_lock, flags);
++	wake_up(&freelist_waitqueue);
++}
++EXPORT_SYMBOL_GPL(deferred_free);
++
++static size_t free_one_item(enum df_reason reason)
++{
++	unsigned long flags;
++	size_t nr_pages;
++	struct deferred_freelist_item *item;
++
++	spin_lock_irqsave(&free_list_lock, flags);
++	if (list_empty(&free_list)) {
++		spin_unlock_irqrestore(&free_list_lock, flags);
++		return 0;
++	}
++	item = list_first_entry(&free_list, struct deferred_freelist_item, list);
++	list_del(&item->list);
++	nr_pages = item->nr_pages;
++	list_nr_pages -= nr_pages;
++	spin_unlock_irqrestore(&free_list_lock, flags);
++
++	item->free(item, reason);
++	return nr_pages;
++}
++
++static unsigned long get_freelist_nr_pages(void)
++{
++	unsigned long nr_pages;
++	unsigned long flags;
++
++	spin_lock_irqsave(&free_list_lock, flags);
++	nr_pages = list_nr_pages;
++	spin_unlock_irqrestore(&free_list_lock, flags);
++	return nr_pages;
++}
++
++static unsigned long freelist_shrink_count(struct shrinker *shrinker,
++					   struct shrink_control *sc)
++{
++	return get_freelist_nr_pages();
++}
++
++static unsigned long freelist_shrink_scan(struct shrinker *shrinker,
++					  struct shrink_control *sc)
++{
++	unsigned long total_freed = 0;
++
++	if (sc->nr_to_scan == 0)
++		return 0;
++
++	while (total_freed < sc->nr_to_scan) {
++		size_t pages_freed = free_one_item(DF_UNDER_PRESSURE);
++
++		if (!pages_freed)
++			break;
++
++		total_freed += pages_freed;
++	}
++
++	return total_freed;
++}
++
++static struct shrinker freelist_shrinker = {
++	.count_objects = freelist_shrink_count,
++	.scan_objects = freelist_shrink_scan,
++	.seeks = DEFAULT_SEEKS,
++	.batch = 0,
++};
++
++static int deferred_free_thread(void *data)
++{
++	while (true) {
++		wait_event_freezable(freelist_waitqueue,
++				     get_freelist_nr_pages() > 0);
++
++		free_one_item(DF_NORMAL);
++	}
++
++	return 0;
++}
++
++static int deferred_freelist_init(void)
++{
++	list_nr_pages = 0;
++
++	init_waitqueue_head(&freelist_waitqueue);
++	freelist_task = kthread_run(deferred_free_thread, NULL,
++				    "%s", "dmabuf-deferred-free-worker");
++	if (IS_ERR(freelist_task)) {
++		pr_err("Creating thread for deferred free failed\n");
++		return -1;
++	}
++	sched_set_normal(freelist_task, 19);
++
++	return register_shrinker(&freelist_shrinker, "dmabuf-deferred-free-shrinker");
++}
++module_init(deferred_freelist_init);
++MODULE_LICENSE("GPL v2");
++
+diff --git a/drivers/dma-buf/heaps/page_pool.c b/drivers/dma-buf/heaps/page_pool.c
+new file mode 100644
+index 000000000000..56e6a6f032b7
+--- /dev/null
++++ b/drivers/dma-buf/heaps/page_pool.c
+@@ -0,0 +1,294 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * DMA BUF page pool system
++ *
++ * Copyright (C) 2020 Linaro Ltd.
++ *
++ * Based on the ION page pool code
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#include "page_pool.h"
++
++#include <linux/list.h>
++#include <linux/shrinker.h>
++#include <linux/spinlock.h>
++#include <linux/swap.h>
++#include <linux/sched/signal.h>
++
++/* page types we track in the pool */
++enum {
++	POOL_LOWPAGE,      /* Clean lowmem pages */
++	POOL_HIGHPAGE,     /* Clean highmem pages */
++
++	POOL_TYPE_SIZE,
++};
++
++/**
++ * struct dmabuf_page_pool - pagepool struct
++ * @count[]:		array of number of pages of that type in the pool
++ * @items[]:		array of list of pages of the specific type
++ * @lock:		lock protecting this struct and especially the count
++ *			item list
++ * @gfp_mask:		gfp_mask to use from alloc
++ * @order:		order of pages in the pool
++ * @list:		list node for list of pools
++ *
++ * Allows you to keep a pool of pre allocated pages to use
++ */
++struct dmabuf_page_pool {
++	int count[POOL_TYPE_SIZE];
++	struct list_head items[POOL_TYPE_SIZE];
++	spinlock_t lock;
++	gfp_t gfp_mask;
++	unsigned int order;
++	struct list_head list;
++};
++
++static LIST_HEAD(pool_list);
++static DEFINE_MUTEX(pool_list_lock);
++
++static inline
++struct page *dmabuf_page_pool_alloc_pages(struct dmabuf_page_pool *pool)
++{
++	if (fatal_signal_pending(current))
++		return NULL;
++	return alloc_pages(pool->gfp_mask, pool->order);
++}
++
++static inline void dmabuf_page_pool_free_pages(struct dmabuf_page_pool *pool,
++					       struct page *page)
++{
++	__free_pages(page, pool->order);
++}
++
++static void dmabuf_page_pool_add(struct dmabuf_page_pool *pool, struct page *page)
++{
++	int index;
++
++	if (PageHighMem(page))
++		index = POOL_HIGHPAGE;
++	else
++		index = POOL_LOWPAGE;
++
++	spin_lock(&pool->lock);
++	list_add_tail(&page->lru, &pool->items[index]);
++	pool->count[index]++;
++	spin_unlock(&pool->lock);
++	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
++			    1 << pool->order);
++}
++
++static struct page *dmabuf_page_pool_remove(struct dmabuf_page_pool *pool, int index)
++{
++	struct page *page;
++
++	spin_lock(&pool->lock);
++	page = list_first_entry_or_null(&pool->items[index], struct page, lru);
++	if (page) {
++		pool->count[index]--;
++		list_del(&page->lru);
++		spin_unlock(&pool->lock);
++		mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
++				    -(1 << pool->order));
++		goto out;
++	}
++	spin_unlock(&pool->lock);
++out:
++	return page;
++}
++
++static struct page *dmabuf_page_pool_fetch(struct dmabuf_page_pool *pool)
++{
++	struct page *page = NULL;
++
++	page = dmabuf_page_pool_remove(pool, POOL_HIGHPAGE);
++	if (!page)
++		page = dmabuf_page_pool_remove(pool, POOL_LOWPAGE);
++
++	return page;
++}
++
++struct page *dmabuf_page_pool_alloc(struct dmabuf_page_pool *pool)
++{
++	struct page *page = NULL;
++
++	if (WARN_ON(!pool))
++		return NULL;
++
++	page = dmabuf_page_pool_fetch(pool);
++
++	if (!page)
++		page = dmabuf_page_pool_alloc_pages(pool);
++	return page;
++}
++EXPORT_SYMBOL_GPL(dmabuf_page_pool_alloc);
++
++void dmabuf_page_pool_free(struct dmabuf_page_pool *pool, struct page *page)
++{
++	if (WARN_ON(pool->order != compound_order(page)))
++		return;
++
++	dmabuf_page_pool_add(pool, page);
++}
++EXPORT_SYMBOL_GPL(dmabuf_page_pool_free);
++
++static int dmabuf_page_pool_total(struct dmabuf_page_pool *pool, bool high)
++{
++	int count = pool->count[POOL_LOWPAGE];
++
++	if (high)
++		count += pool->count[POOL_HIGHPAGE];
++
++	return count << pool->order;
++}
++
++struct dmabuf_page_pool *dmabuf_page_pool_create(gfp_t gfp_mask, unsigned int order)
++{
++	struct dmabuf_page_pool *pool = kmalloc(sizeof(*pool), GFP_KERNEL);
++	int i;
++
++	if (!pool)
++		return NULL;
++
++	for (i = 0; i < POOL_TYPE_SIZE; i++) {
++		pool->count[i] = 0;
++		INIT_LIST_HEAD(&pool->items[i]);
++	}
++	pool->gfp_mask = gfp_mask | __GFP_COMP;
++	pool->order = order;
++	spin_lock_init(&pool->lock);
++
++	mutex_lock(&pool_list_lock);
++	list_add(&pool->list, &pool_list);
++	mutex_unlock(&pool_list_lock);
++
++	return pool;
++}
++EXPORT_SYMBOL_GPL(dmabuf_page_pool_create);
++
++void dmabuf_page_pool_destroy(struct dmabuf_page_pool *pool)
++{
++	struct page *page;
++	int i;
++
++	/* Remove us from the pool list */
++	mutex_lock(&pool_list_lock);
++	list_del(&pool->list);
++	mutex_unlock(&pool_list_lock);
++
++	/* Free any remaining pages in the pool */
++	for (i = 0; i < POOL_TYPE_SIZE; i++) {
++		while ((page = dmabuf_page_pool_remove(pool, i)))
++			dmabuf_page_pool_free_pages(pool, page);
++	}
++
++	kfree(pool);
++}
++EXPORT_SYMBOL_GPL(dmabuf_page_pool_destroy);
++
++unsigned long dmabuf_page_pool_get_size(struct dmabuf_page_pool *pool)
++{
++       int i;
++       unsigned long num_pages = 0;
++
++       spin_lock(&pool->lock);
++       for (i = 0; i < POOL_TYPE_SIZE; ++i)
++               num_pages += pool->count[i];
++       spin_unlock(&pool->lock);
++       num_pages <<= pool->order; /* pool order is immutable */
++
++       return num_pages * PAGE_SIZE;
++}
++EXPORT_SYMBOL_GPL(dmabuf_page_pool_get_size);
++
++static int dmabuf_page_pool_do_shrink(struct dmabuf_page_pool *pool, gfp_t gfp_mask,
++				      int nr_to_scan)
++{
++	int freed = 0;
++	bool high;
++
++	if (current_is_kswapd())
++		high = true;
++	else
++		high = !!(gfp_mask & __GFP_HIGHMEM);
++
++	if (nr_to_scan == 0)
++		return dmabuf_page_pool_total(pool, high);
++
++	while (freed < nr_to_scan) {
++		struct page *page;
++
++		/* Try to free low pages first */
++		page = dmabuf_page_pool_remove(pool, POOL_LOWPAGE);
++		if (!page)
++			page = dmabuf_page_pool_remove(pool, POOL_HIGHPAGE);
++
++		if (!page)
++			break;
++
++		dmabuf_page_pool_free_pages(pool, page);
++		freed += (1 << pool->order);
++	}
++
++	return freed;
++}
++
++static int dmabuf_page_pool_shrink(gfp_t gfp_mask, int nr_to_scan)
++{
++	struct dmabuf_page_pool *pool;
++	int nr_total = 0;
++	int nr_freed;
++	int only_scan = 0;
++
++	if (!nr_to_scan)
++		only_scan = 1;
++
++	mutex_lock(&pool_list_lock);
++	list_for_each_entry(pool, &pool_list, list) {
++		if (only_scan) {
++			nr_total += dmabuf_page_pool_do_shrink(pool,
++							       gfp_mask,
++							       nr_to_scan);
++		} else {
++			nr_freed = dmabuf_page_pool_do_shrink(pool,
++							      gfp_mask,
++							      nr_to_scan);
++			nr_to_scan -= nr_freed;
++			nr_total += nr_freed;
++			if (nr_to_scan <= 0)
++				break;
++		}
++	}
++	mutex_unlock(&pool_list_lock);
++
++	return nr_total;
++}
++
++static unsigned long dmabuf_page_pool_shrink_count(struct shrinker *shrinker,
++						   struct shrink_control *sc)
++{
++	return dmabuf_page_pool_shrink(sc->gfp_mask, 0);
++}
++
++static unsigned long dmabuf_page_pool_shrink_scan(struct shrinker *shrinker,
++						  struct shrink_control *sc)
++{
++	if (sc->nr_to_scan == 0)
++		return 0;
++	return dmabuf_page_pool_shrink(sc->gfp_mask, sc->nr_to_scan);
++}
++
++struct shrinker pool_shrinker = {
++	.count_objects = dmabuf_page_pool_shrink_count,
++	.scan_objects = dmabuf_page_pool_shrink_scan,
++	.seeks = DEFAULT_SEEKS,
++	.batch = 0,
++};
++
++static int dmabuf_page_pool_init_shrinker(void)
++{
++	return register_shrinker(&pool_shrinker, "dmabuf-page-pool-shrinker");
++}
++module_init(dmabuf_page_pool_init_shrinker);
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/dma-buf/heaps/page_pool.h b/drivers/dma-buf/heaps/page_pool.h
+new file mode 100644
+index 000000000000..5f6f938fa5d9
+--- /dev/null
++++ b/drivers/dma-buf/heaps/page_pool.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * DMA BUF PagePool implementation
++ * Based on earlier ION code by Google
++ *
++ * Copyright (C) 2011 Google, Inc.
++ * Copyright (C) 2020 Linaro Ltd.
++ */
++
++#ifndef _DMABUF_PAGE_POOL_H
++#define _DMABUF_PAGE_POOL_H
++
++#include <linux/mm_types.h>
++#include <linux/types.h>
++
++struct dmabuf_page_pool;
++
++struct dmabuf_page_pool *dmabuf_page_pool_create(gfp_t gfp_mask,
++						 unsigned int order);
++void dmabuf_page_pool_destroy(struct dmabuf_page_pool *pool);
++struct page *dmabuf_page_pool_alloc(struct dmabuf_page_pool *pool);
++void dmabuf_page_pool_free(struct dmabuf_page_pool *pool, struct page *page);
++
++/* get pool size in bytes */
++unsigned long dmabuf_page_pool_get_size(struct dmabuf_page_pool *pool);
++
++#endif /* _DMABUF_PAGE_POOL_H */
+diff --git a/drivers/dma-buf/heaps/rk_cma_heap.c b/drivers/dma-buf/heaps/rk_cma_heap.c
+index c93674c2a79c..dfc9cb40143a 100644
+--- a/drivers/dma-buf/heaps/rk_cma_heap.c
++++ b/drivers/dma-buf/heaps/rk_cma_heap.c
+@@ -274,31 +274,34 @@ static void *cma_heap_do_vmap(struct cma_heap_buffer *buffer)
+ 	return vaddr;
+ }
+ 
+-static void *cma_heap_vmap(struct dma_buf *dmabuf)
++static int cma_heap_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ 	struct cma_heap_buffer *buffer = dmabuf->priv;
+ 	void *vaddr;
++	int ret = 0;
+ 
+ 	mutex_lock(&buffer->lock);
+ 	if (buffer->vmap_cnt) {
+ 		buffer->vmap_cnt++;
+-		vaddr = buffer->vaddr;
++		iosys_map_set_vaddr(map, buffer->vaddr);
+ 		goto out;
+ 	}
+ 
+ 	vaddr = cma_heap_do_vmap(buffer);
+-	if (IS_ERR(vaddr))
++	if (IS_ERR(vaddr)) {
++		ret = PTR_ERR(vaddr);
+ 		goto out;
+-
++	}
+ 	buffer->vaddr = vaddr;
+ 	buffer->vmap_cnt++;
++	iosys_map_set_vaddr(map, buffer->vaddr);
+ out:
+ 	mutex_unlock(&buffer->lock);
+ 
+-	return vaddr;
++	return ret;
+ }
+ 
+-static void cma_heap_vunmap(struct dma_buf *dmabuf, void *vaddr)
++static void cma_heap_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ 	struct cma_heap_buffer *buffer = dmabuf->priv;
+ 
+@@ -308,6 +311,7 @@ static void cma_heap_vunmap(struct dma_buf *dmabuf, void *vaddr)
+ 		buffer->vaddr = NULL;
+ 	}
+ 	mutex_unlock(&buffer->lock);
++	iosys_map_clear(map);
+ }
+ 
+ static void cma_heap_dma_buf_release(struct dma_buf *dmabuf)
+@@ -318,6 +322,7 @@ static void cma_heap_dma_buf_release(struct dma_buf *dmabuf)
+ 	if (buffer->vmap_cnt > 0) {
+ 		WARN(1, "%s: buffer still mapped in the kernel\n", __func__);
+ 		vunmap(buffer->vaddr);
++		buffer->vaddr = NULL;
+ 	}
+ 
+ 	/* free page list */
+@@ -374,7 +379,7 @@ static struct dma_buf *cma_heap_do_allocate(struct dma_heap *heap,
+ 	if (align > CONFIG_CMA_ALIGNMENT)
+ 		align = CONFIG_CMA_ALIGNMENT;
+ 
+-	cma_pages = cma_alloc(cma_heap->cma, pagecount, align, GFP_KERNEL);
++	cma_pages = cma_alloc(cma_heap->cma, pagecount, align, false);
+ 	if (!cma_pages)
+ 		goto free_buffer;
+ 
+@@ -614,3 +619,4 @@ static int add_default_cma_heap(void)
+ module_init(add_default_cma_heap);
+ MODULE_DESCRIPTION("DMA-BUF CMA Heap");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS(DMA_BUF);
+diff --git a/drivers/dma-buf/heaps/rk_system_heap.c b/drivers/dma-buf/heaps/rk_system_heap.c
+index 52dcfc2bb82c..76afe7a9acf4 100644
+--- a/drivers/dma-buf/heaps/rk_system_heap.c
++++ b/drivers/dma-buf/heaps/rk_system_heap.c
+@@ -25,7 +25,6 @@
+ #include <linux/rockchip/rockchip_sip.h>
+ 
+ #include "page_pool.h"
+-#include "deferred-free-helper.h"
+ 
+ static struct dma_heap *sys_heap;
+ static struct dma_heap *sys_dma32_heap;
+@@ -44,7 +43,6 @@ struct system_heap_buffer {
+ 	struct sg_table sg_table;
+ 	int vmap_cnt;
+ 	void *vaddr;
+-	struct deferred_freelist_item deferred_free;
+ 	struct dmabuf_page_pool **pools;
+ 	bool uncached;
+ };
+@@ -377,31 +375,35 @@ static void *system_heap_do_vmap(struct system_heap_buffer *buffer)
+ 	return vaddr;
+ }
+ 
+-static void *system_heap_vmap(struct dma_buf *dmabuf)
++static int system_heap_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ 	struct system_heap_buffer *buffer = dmabuf->priv;
+ 	void *vaddr;
++	int ret = 0;
+ 
+ 	mutex_lock(&buffer->lock);
+ 	if (buffer->vmap_cnt) {
+ 		buffer->vmap_cnt++;
+-		vaddr = buffer->vaddr;
++		iosys_map_set_vaddr(map, buffer->vaddr);
+ 		goto out;
+ 	}
+ 
+ 	vaddr = system_heap_do_vmap(buffer);
+-	if (IS_ERR(vaddr))
++	if (IS_ERR(vaddr)) {
++		ret = PTR_ERR(vaddr);
+ 		goto out;
++	}
+ 
+ 	buffer->vaddr = vaddr;
+ 	buffer->vmap_cnt++;
++	iosys_map_set_vaddr(map, buffer->vaddr);
+ out:
+ 	mutex_unlock(&buffer->lock);
+ 
+-	return vaddr;
++	return ret;
+ }
+ 
+-static void system_heap_vunmap(struct dma_buf *dmabuf, void *vaddr)
++static void system_heap_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ 	struct system_heap_buffer *buffer = dmabuf->priv;
+ 
+@@ -411,6 +413,7 @@ static void system_heap_vunmap(struct dma_buf *dmabuf, void *vaddr)
+ 		buffer->vaddr = NULL;
+ 	}
+ 	mutex_unlock(&buffer->lock);
++	iosys_map_clear(map);
+ }
+ 
+ static int system_heap_zero_buffer(struct system_heap_buffer *buffer)
+@@ -423,54 +426,38 @@ static int system_heap_zero_buffer(struct system_heap_buffer *buffer)
+ 
+ 	for_each_sgtable_page(sgt, &piter, 0) {
+ 		p = sg_page_iter_page(&piter);
+-		vaddr = kmap_atomic(p);
++		vaddr = kmap_local_page(p);
+ 		memset(vaddr, 0, PAGE_SIZE);
+-		kunmap_atomic(vaddr);
++		kunmap_local(vaddr);
+ 	}
+ 
+ 	return ret;
+ }
+ 
+-static void system_heap_buf_free(struct deferred_freelist_item *item,
+-				 enum df_reason reason)
++static void system_heap_dma_buf_release(struct dma_buf *dmabuf)
+ {
+-	struct system_heap_buffer *buffer;
++	struct system_heap_buffer *buffer = dmabuf->priv;
+ 	struct sg_table *table;
+ 	struct scatterlist *sg;
+ 	int i, j;
+ 
+-	buffer = container_of(item, struct system_heap_buffer, deferred_free);
+ 	/* Zero the buffer pages before adding back to the pool */
+-	if (reason == DF_NORMAL)
+-		if (system_heap_zero_buffer(buffer))
+-			reason = DF_UNDER_PRESSURE; // On failure, just free
++	system_heap_zero_buffer(buffer);
+ 
+ 	table = &buffer->sg_table;
+ 	for_each_sgtable_sg(table, sg, i) {
+ 		struct page *page = sg_page(sg);
+ 
+-		if (reason == DF_UNDER_PRESSURE) {
+-			__free_pages(page, compound_order(page));
+-		} else {
+-			for (j = 0; j < NUM_ORDERS; j++) {
+-				if (compound_order(page) == orders[j])
+-					break;
+-			}
+-			dmabuf_page_pool_free(buffer->pools[j], page);
++		for (j = 0; j < NUM_ORDERS; j++) {
++			if (compound_order(page) == orders[j])
++				break;
+ 		}
++		dmabuf_page_pool_free(buffer->pools[j], page);
+ 	}
+ 	sg_free_table(table);
+ 	kfree(buffer);
+ }
+ 
+-static void system_heap_dma_buf_release(struct dma_buf *dmabuf)
+-{
+-	struct system_heap_buffer *buffer = dmabuf->priv;
+-	int npages = PAGE_ALIGN(buffer->len) / PAGE_SIZE;
+-
+-	deferred_free(&buffer->deferred_free, system_heap_buf_free, npages);
+-}
+-
+ static const struct dma_buf_ops system_heap_buf_ops = {
+ 	.attach = system_heap_attach,
+ 	.detach = system_heap_detach,
+@@ -657,17 +644,14 @@ static struct dma_buf *system_heap_allocate(struct dma_heap *heap,
+ 
+ static long system_get_pool_size(struct dma_heap *heap)
+ {
+-	int i;
+-	long num_pages = 0;
++	unsigned long num_bytes = 0;
+ 	struct dmabuf_page_pool **pool;
+ 
+ 	pool = strstr(dma_heap_get_name(heap), "dma32") ? dma32_pools : pools;
+-	for (i = 0; i < NUM_ORDERS; i++, pool++) {
+-		num_pages += ((*pool)->count[POOL_LOWPAGE] +
+-			      (*pool)->count[POOL_HIGHPAGE]) << (*pool)->order;
+-	}
++	for (int i = 0; i < NUM_ORDERS; i++, pool++)
++		num_bytes += dmabuf_page_pool_get_size(*pool);
+ 
+-	return num_pages << PAGE_SHIFT;
++	return num_bytes;
+ }
+ 
+ static const struct dma_heap_ops system_heap_ops = {
+@@ -839,3 +823,4 @@ static int system_heap_create(void)
+ }
+ module_init(system_heap_create);
+ MODULE_LICENSE("GPL v2");
++MODULE_IMPORT_NS(DMA_BUF);
+diff --git a/include/linux/dma-buf.h b/include/linux/dma-buf.h
+index 54f9f7db635a..5a47139ada86 100644
+--- a/include/linux/dma-buf.h
++++ b/include/linux/dma-buf.h
+@@ -229,6 +229,41 @@ struct dma_buf_ops {
+ 	 */
+ 	int (*begin_cpu_access)(struct dma_buf *, enum dma_data_direction);
+ 
++	/**
++	 * @begin_cpu_access_partial:
++	 *
++	 * This is called from dma_buf_begin_cpu_access_partial() and allows the
++	 * exporter to ensure that the memory specified in the range is
++	 * available for cpu access - the exporter might need to allocate or
++	 * swap-in and pin the backing storage.
++	 * The exporter also needs to ensure that cpu access is
++	 * coherent for the access direction. The direction can be used by the
++	 * exporter to optimize the cache flushing, i.e. access with a different
++	 * direction (read instead of write) might return stale or even bogus
++	 * data (e.g. when the exporter needs to copy the data to temporary
++	 * storage).
++	 *
++	 * This callback is optional.
++	 *
++	 * FIXME: This is both called through the DMA_BUF_IOCTL_SYNC command
++	 * from userspace (where storage shouldn't be pinned to avoid handing
++	 * de-factor mlock rights to userspace) and for the kernel-internal
++	 * users of the various kmap interfaces, where the backing storage must
++	 * be pinned to guarantee that the atomic kmap calls can succeed. Since
++	 * there's no in-kernel users of the kmap interfaces yet this isn't a
++	 * real problem.
++	 *
++	 * Returns:
++	 *
++	 * 0 on success or a negative error code on failure. This can for
++	 * example fail when the backing storage can't be allocated. Can also
++	 * return -ERESTARTSYS or -EINTR when the call has been interrupted and
++	 * needs to be restarted.
++	 */
++	int (*begin_cpu_access_partial)(struct dma_buf *dmabuf,
++					enum dma_data_direction,
++					unsigned int offset, unsigned int len);
++
+ 	/**
+ 	 * @end_cpu_access:
+ 	 *
+@@ -246,6 +281,28 @@ struct dma_buf_ops {
+ 	 */
+ 	int (*end_cpu_access)(struct dma_buf *, enum dma_data_direction);
+ 
++	/**
++	 * @end_cpu_access_partial:
++	 *
++	 * This is called from dma_buf_end_cpu_access_partial() when the
++	 * importer is done accessing the CPU. The exporter can use to limit
++	 * cache flushing to only the range specefied and to unpin any
++	 * resources pinned in @begin_cpu_access_umapped.
++	 * The result of any dma_buf kmap calls after end_cpu_access_partial is
++	 * undefined.
++	 *
++	 * This callback is optional.
++	 *
++	 * Returns:
++	 *
++	 * 0 on success or a negative error code on failure. Can return
++	 * -ERESTARTSYS or -EINTR when the call has been interrupted and needs
++	 * to be restarted.
++	 */
++	int (*end_cpu_access_partial)(struct dma_buf *dmabuf,
++				      enum dma_data_direction,
++				      unsigned int offset, unsigned int len);
++
+ 	/**
+ 	 * @mmap:
+ 	 *
+@@ -285,6 +342,20 @@ struct dma_buf_ops {
+ 
+ 	int (*vmap)(struct dma_buf *dmabuf, struct iosys_map *map);
+ 	void (*vunmap)(struct dma_buf *dmabuf, struct iosys_map *map);
++
++	/**
++	 * @get_flags:
++	 *
++	 * This is called by dma_buf_get_flags and is used to get the buffer's
++	 * flags.
++	 * This callback is optional.
++	 *
++	 * Returns:
++	 *
++	 * 0 on success or a negative error code on failure. On success flags
++	 * will be populated with the buffer's flags.
++	 */
++	int (*get_flags)(struct dma_buf *dmabuf, unsigned long *flags);
+ };
+ 
+ #ifdef CONFIG_DMABUF_CACHE
+@@ -523,6 +594,8 @@ struct dma_buf_attach_ops {
+  * @importer_ops: importer operations for this attachment, if provided
+  * dma_buf_map/unmap_attachment() must be called with the dma_resv lock held.
+  * @importer_priv: importer specific attachment data.
++ * @dma_map_attrs: DMA attributes to be used when the exporter maps the buffer
++ * through dma_buf_map_attachment.
+  *
+  * This structure holds the attachment information between the dma_buf buffer
+  * and its user device(s). The list contains one attachment struct per device
+@@ -543,6 +616,7 @@ struct dma_buf_attachment {
+ 	const struct dma_buf_attach_ops *importer_ops;
+ 	void *importer_priv;
+ 	void *priv;
++	unsigned long dma_map_attrs;
+ };
+ 
+ /**
+@@ -620,6 +694,7 @@ dma_buf_attachment_is_dynamic(struct dma_buf_attachment *attach)
+ 	return !!attach->importer_ops;
+ }
+ 
++int is_dma_buf_file(struct file *file);
+ int dma_buf_get_each(int (*callback)(const struct dma_buf *dmabuf,
+ 		     void *private), void *private);
+ struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
+@@ -646,8 +721,14 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *, struct sg_table *,
+ void dma_buf_move_notify(struct dma_buf *dma_buf);
+ int dma_buf_begin_cpu_access(struct dma_buf *dma_buf,
+ 			     enum dma_data_direction dir);
++int dma_buf_begin_cpu_access_partial(struct dma_buf *dma_buf,
++				     enum dma_data_direction dir,
++				     unsigned int offset, unsigned int len);
+ int dma_buf_end_cpu_access(struct dma_buf *dma_buf,
+ 			   enum dma_data_direction dir);
++int dma_buf_end_cpu_access_partial(struct dma_buf *dma_buf,
++				     enum dma_data_direction dir,
++				     unsigned int offset, unsigned int len);
+ struct sg_table *
+ dma_buf_map_attachment_unlocked(struct dma_buf_attachment *attach,
+ 				enum dma_data_direction direction);
+@@ -660,6 +741,7 @@ int dma_buf_mmap(struct dma_buf *, struct vm_area_struct *,
+ int dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map);
+ void dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map);
+ long dma_buf_set_name(struct dma_buf *dmabuf, const char *name);
++int dma_buf_get_flags(struct dma_buf *dmabuf, unsigned long *flags);
+ #ifdef CONFIG_DMABUF_CACHE
+ /**
+  * dma_buf_set_destructor - set the dma-buf's destructor
+diff --git a/include/linux/dma-heap.h b/include/linux/dma-heap.h
+index a96c42dcba82..9ad1a4220900 100644
+--- a/include/linux/dma-heap.h
++++ b/include/linux/dma-heap.h
+@@ -18,6 +18,7 @@ struct dma_heap;
+ /**
+  * struct dma_heap_ops - ops to operate on a given heap
+  * @allocate:		allocate dmabuf and return struct dma_buf ptr
++ * @get_pool_size:	if heap maintains memory pools, get pool size in bytes
+  *
+  * allocate returns dmabuf on success, ERR_PTR(-errno) on error.
+  */
+@@ -26,6 +27,7 @@ struct dma_heap_ops {
+ 				    unsigned long len,
+ 				    unsigned long fd_flags,
+ 				    unsigned long heap_flags);
++	long (*get_pool_size)(struct dma_heap *heap);
+ #if IS_ENABLED(CONFIG_NO_GKI)
+ 	int (*get_phys)(struct dma_heap *heap, struct dma_heap_phys_data *phys);
+ #endif
+@@ -54,6 +56,15 @@ struct dma_heap_export_info {
+  */
+ void *dma_heap_get_drvdata(struct dma_heap *heap);
+ 
++/**
++ * dma_heap_get_dev() - get device struct for the heap
++ * @heap: DMA-Heap to retrieve device struct from
++ *
++ * Returns:
++ * The device struct for the heap.
++ */
++struct device *dma_heap_get_dev(struct dma_heap *heap);
++
+ /**
+  * dma_heap_get_name() - get heap name
+  * @heap: DMA-Heap to retrieve private data for
+@@ -69,4 +80,49 @@ const char *dma_heap_get_name(struct dma_heap *heap);
+  */
+ struct dma_heap *dma_heap_add(const struct dma_heap_export_info *exp_info);
+ 
++/**
++ * dma_heap_put - drops a reference to a dmabuf heaps, potentially freeing it
++ * @heap:		heap pointer
++ */
++void dma_heap_put(struct dma_heap *heap);
++
++/**
++ * dma_heap_find - Returns the registered dma_heap with the specified name
++ * @name: Name of the heap to find
++ *
++ * NOTE: dma_heaps returned from this function MUST be released
++ * using dma_heap_put() when the user is done.
++ */
++struct dma_heap *dma_heap_find(const char *name);
++
++/**
++ * dma_heap_buffer_alloc - Allocate dma-buf from a dma_heap
++ * @heap:	dma_heap to allocate from
++ * @len:	size to allocate
++ * @fd_flags:	flags to set on returned dma-buf fd
++ * @heap_flags:	flags to pass to the dma heap
++ *
++ * This is for internal dma-buf allocations only.
++ */
++struct dma_buf *dma_heap_buffer_alloc(struct dma_heap *heap, size_t len,
++				      unsigned int fd_flags,
++				      unsigned int heap_flags);
++
++/** dma_heap_buffer_free - Free dma_buf allocated by dma_heap_buffer_alloc
++ * @dma_buf:	dma_buf to free
++ *
++ * This is really only a simple wrapper to dma_buf_put()
++ */
++void dma_heap_buffer_free(struct dma_buf *);
++
++/**
++ * dma_heap_bufferfd_alloc - Allocate dma-buf fd from a dma_heap
++ * @heap:	dma_heap to allocate from
++ * @len:	size to allocate
++ * @fd_flags:	flags to set on returned dma-buf fd
++ * @heap_flags:	flags to pass to the dma heap
++ */
++int dma_heap_bufferfd_alloc(struct dma_heap *heap, size_t len,
++			    unsigned int fd_flags,
++			    unsigned int heap_flags);
+ #endif /* _DMA_HEAPS_H */
+-- 
+2.38.5
+

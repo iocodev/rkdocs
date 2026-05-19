@@ -1,0 +1,31 @@
+From 2a6e06c37a244f88e8feab66116884ca1bcea98c Mon Sep 17 00:00:00 2001
+From: Lin Jianhua <linjh@rock-chips.com>
+Date: Tue, 10 Jun 2025 10:50:04 +0800
+Subject: [PATCH 6/7] irq: xenomai mask irq if linux in it
+
+Change-Id: I19b60302ce4ea6767617e00c6b158e23384a9a1a
+Signed-off-by: Lin Jianhua <linjh@rock-chips.com>
+---
+ kernel/irq/chip.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index 572c63e20f72..0130405236c8 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -926,8 +926,11 @@ void handle_fasteoi_irq(struct irq_desc *desc)
+ 	raw_spin_lock(&desc->lock);
+ 
+ 	flow = get_flow_step(desc);
+-	if (may_start_flow(flow) && !irq_may_run(desc))
++	if (may_start_flow(flow) && !irq_may_run(desc)) {
++		if (irqd_irq_inprogress(&desc->irq_data))
++			mask_irq(desc);
+ 		goto out;
++	}
+ 
+ 	if (should_feed_pipeline(desc, flow)) {
+ 		if (handle_oob_irq(desc))
+-- 
+2.34.1
+

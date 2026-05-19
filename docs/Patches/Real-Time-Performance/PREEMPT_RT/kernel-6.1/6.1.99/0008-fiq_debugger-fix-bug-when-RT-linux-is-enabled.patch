@@ -1,0 +1,30 @@
+From b3f1b0d138cc9b556dc595388da19d5f7ea297ec Mon Sep 17 00:00:00 2001
+From: Huibin Hong <huibin.hong@rock-chips.com>
+Date: Wed, 13 Aug 2025 17:47:44 +0800
+Subject: [PATCH] fiq_debugger: fix bug when RT linux is enabled
+
+Set debugger irq to IRQF_NO_THREAD, or irq handler calls get_irq_regs(),
+and return null.
+
+Signed-off-by: Huibin Hong <huibin.hong@rock-chips.com>
+Change-Id: Ic61d2bb2d233e74a2028405b80075eefabd0a9a1
+---
+ drivers/soc/rockchip/fiq_debugger/fiq_debugger.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/soc/rockchip/fiq_debugger/fiq_debugger.c b/drivers/soc/rockchip/fiq_debugger/fiq_debugger.c
+index 4647144ea757..6def4bb0f5d5 100644
+--- a/drivers/soc/rockchip/fiq_debugger/fiq_debugger.c
++++ b/drivers/soc/rockchip/fiq_debugger/fiq_debugger.c
+@@ -1567,7 +1567,7 @@ static int fiq_debugger_probe(struct platform_device *pdev)
+ 			pr_err("%s: could not install nmi irq handler\n", __func__);
+ 			irq_clear_status_flags(state->uart_irq, IRQ_NOAUTOEN);
+ 			ret = request_irq(state->uart_irq, fiq_debugger_uart_irq,
+-					  IRQF_NO_SUSPEND | IRQF_NOBALANCING, "debug", state);
++					  IRQF_NO_SUSPEND | IRQF_NOBALANCING | IRQF_NO_THREAD, "debug", state);
+ 		} else {
+ 			enable_nmi(state->uart_irq);
+ 		}
+-- 
+2.17.1
+
