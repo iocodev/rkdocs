@@ -67,4 +67,10 @@
         |-  ISP32-lite                                   // ISP32-lite for RK3562
           |- CN                                     // 中文版
 
+13) Android9.0及以上Camera驱动调试指导文档
+《Rockchip_Developer_Guide_Android_Camera_Driver_CN.pdf》
+
+14) Android14.0及以上Camera GMS测试问题排查指导文档
+《Rockchip_Trouble_Shooting_Android_GMS_Camera_FAQ_CN.pdf》
+
 备注：https://redmine.rock-chips.com/documents/53中可以查看最新相关文档
